@@ -48,6 +48,7 @@ export default function App() {
       body: JSON.stringify({ text: value }),
     });
     const data = await res.json();
+    if (!res.ok || data.id == null) return;
     setInboxId(data.id);
     setLog((prev) => [...prev, { role: "user", text: value }]);
     setText("");
