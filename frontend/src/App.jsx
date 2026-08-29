@@ -82,9 +82,9 @@ export default function App() {
         ) : (
           <div className="log">
             {log.map((item, i) => (
-              <p key={i}>
-                {item.role === "user" ? "вы" : "агент"}: {item.text}
-              </p>
+              <p key={i} className={item.role}>
+              {item.text}
+            </p>
             ))}
           </div>
         )}
