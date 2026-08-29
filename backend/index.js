@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { pushInbox, readState, CHANNEL_INBOX } from "./store_pg.js";
+import { pushInbox, readState, notify, CHANNEL_INBOX } from "./store_pg.js";
 
 dotenv.config();
 
