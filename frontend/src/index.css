@@ -1,15 +1,25 @@
+:root {
+  --bg: #16110e;
+  --fg: #efe6d6;
+  --muted: #b5a894;
+  --line: #2a241f;
+  --serif: Georgia, "Times New Roman", serif;
+  --sans: system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
 body {
-  font-family: sans-serif;
-  margin: 2rem;
-  max-width: 40rem;
-}
-
-form {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 1rem;
-}
-
-input {
-  flex: 1;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
 }
