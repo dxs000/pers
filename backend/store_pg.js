@@ -34,3 +34,11 @@ export async function readInbox(id) {
   );
   return result.rows[0] ?? null;
 }
+
+export async function readReply(replyId) {
+  const result = await pool.query(
+    "SELECT text FROM messages WHERE id = $1",
+    [replyId]
+  );
+  return result.rows[0]?.text ?? null;
+}
