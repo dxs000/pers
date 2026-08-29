@@ -40,27 +40,25 @@ export default function App() {
     setInboxId(data.id);
     setText("");
   }
-
-  
-
   return (
-    <form onSubmit={send}>
-      <input
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        autoFocus
-      />
-      <button type="submit">Отправить</button>
-      {inboxId != null && <p>inbox #{inboxId}</p>}
-    </form>
-
-    {status?.state === "answered" && <p>{status.text}</p>}
+    <>
+      <form onSubmit={send}>
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          autoFocus
+        />
+        <button type="submit">Отправить</button>
+        {inboxId != null && <p>inbox #{inboxId}</p>}
+      </form>
+      {status?.state === "answered" && <p>{status.text}</p>}
       {status?.state === "dropped" && (
         <p>эти слова дошли, но уже к прошлому разговору</p>
       )}
       {status?.timeout && (
         <p>нет ответа за 180 с — похоже, агент не запущен</p>
       )}
-  );
+    </>
+  );  
  
 }
