@@ -11,7 +11,9 @@ export default function App() {
     if (inboxId == null) return;
     setStatus({ state: "waiting", text: null });
     const started = Date.now();
-    const timer = setInterval(async () => {
+    let timer;
+
+    async function tick() {
       if (Date.now() - started > 180_000) {
         clearInterval(timer);
         setStatus({ state: "waiting", text: null, timeout: true });
@@ -23,7 +25,10 @@ export default function App() {
         clearInterval(timer);
         setStatus(data);
       }
-    }, 2000);
+    }
+
+    tick();
+    timer = setInterval(tick, 2000);
     return () => clearInterval(timer);
   }, [inboxId]);
 
