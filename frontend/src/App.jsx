@@ -92,17 +92,24 @@ export default function App() {
 
       <footer className="composer">
         <form onSubmit={send}>
-          <input
+          <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                e.currentTarget.form?.requestSubmit();
+              }
+            }}
             disabled={busy}
             autoFocus
+            rows={1}
             placeholder="Напишите реплику"
           />
           <button type="submit" disabled={busy}>↑</button>
         </form>
         <p className="hint">
-          Enter — отправить. Клиент только пишет в inbox и читает ответ.
+          Enter — отправить, Shift+Enter — новая строка.
         </p>
         {status?.state === "dropped" && (
           <p>эти слова дошли, но уже к прошлому разговору</p>
