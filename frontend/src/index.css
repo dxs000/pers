@@ -23,3 +23,44 @@ body {
   color: var(--fg);
   font-family: var(--sans);
 }
+
+.app {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.top,
+.composer {
+  padding: 1.25rem 1.75rem;
+  border-color: var(--line);
+  border-style: solid;
+  border-width: 0;
+}
+
+.top {
+  border-bottom-width: 1px;
+}
+
+.composer {
+  border-top-width: 1px;
+}
+
+.stage {
+  flex: 1;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 0.7rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.top h1 {
+  margin: 0.2rem 0 0;
+  font-family: var(--serif);
+  font-size: 1.7rem;
+  font-weight: 500;
+}
