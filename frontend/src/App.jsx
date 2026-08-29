@@ -72,6 +72,7 @@ export default function App() {
         <button type="submit" disabled={busy} >Отправить</button>
         {inboxId != null && <p>inbox #{inboxId}</p>}
       </form>
+      {busy && <p>персонаж думает…</p>}
       {status?.state === "dropped" && (
         <p>эти слова дошли, но уже к прошлому разговору</p>
       )}
