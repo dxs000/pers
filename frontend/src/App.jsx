@@ -62,7 +62,10 @@ export default function App() {
           <p className="sub">клиент пишет в inbox и читает ответ</p>
         </div>
         <div className="top-right">
-          <span>демон</span>
+          <label className="toggle">
+            демон
+            <span className="switch" />
+          </label>
           <span>экран</span>
         </div>
       </header>

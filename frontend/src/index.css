@@ -157,3 +157,23 @@ body {
   color: var(--muted);
   font-size: 0.9rem;
 }
+
+.stage:has(.log) {
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem 1.75rem;
+  overflow: auto;
+}
+
+.log {
+  width: min(40rem, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.log p {
+  margin: 0;
+  line-height: 1.55;
+}
