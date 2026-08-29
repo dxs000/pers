@@ -63,13 +63,23 @@ export default function App() {
       </header>
 
       <main className="stage">
-        <div className="log">
-          {log.map((item, i) => (
-            <p key={i}>
-              {item.role === "user" ? "вы" : "агент"}: {item.text}
+        {log.length === 0 ? (
+          <div className="empty">
+            <h2>Напишите реплику</h2>
+            <p>
+              Она ляжет в очередь. Ответит агент, если он запущен
+              и смотрит inbox.
             </p>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div className="log">
+            {log.map((item, i) => (
+              <p key={i}>
+                {item.role === "user" ? "вы" : "агент"}: {item.text}
+              </p>
+            ))}
+          </div>
+        )}
       </main>
 
       <footer className="composer">
