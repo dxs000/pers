@@ -89,3 +89,51 @@ body {
   color: var(--muted);
   line-height: 1.5;
 }
+
+.composer form {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  max-width: 36rem;
+  margin: 0 auto;
+}
+
+.composer input {
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: #2a241f;
+  color: var(--fg);
+  border-radius: 999px;
+  padding: 0.85rem 1.2rem;
+  font: inherit;
+}
+
+.composer input::placeholder {
+  color: var(--muted);
+}
+
+.composer button {
+  width: 2.4rem;
+  height: 2.4rem;
+  border: 0;
+  border-radius: 999px;
+  background: #d7c7ae;
+  color: #1b1512;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.composer button:disabled,
+.composer input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.composer p {
+  max-width: 36rem;
+  margin: 0.6rem auto 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
