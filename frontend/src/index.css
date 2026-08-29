@@ -189,3 +189,29 @@ body {
   font-size: 1.15rem;
   line-height: 1.6;
 }
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.switch {
+  width: 2rem;
+  height: 1.1rem;
+  border-radius: 999px;
+  background: #d7c7ae;
+  position: relative;
+  display: inline-block;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 0.12rem;
+  right: 0.12rem;
+  width: 0.86rem;
+  height: 0.86rem;
+  border-radius: 50%;
+  background: #1b1512;
+}
