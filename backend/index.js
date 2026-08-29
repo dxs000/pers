@@ -1,6 +1,6 @@
 import express from "express";
 import dotenv from "dotenv";
-import { pushInbox, readState } from "./store_pg.js";
+import { pushInbox, readState, CHANNEL_INBOX } from "./store_pg.js";
 
 dotenv.config();
 
@@ -17,6 +17,7 @@ app.post("/inbox", async (req, res) => {
     return;
   }
   const id = await pushInbox(text);
+  await notify(CHANNEL_INBOX, String(id));
   res.status(201).json({ id });
 });
 
