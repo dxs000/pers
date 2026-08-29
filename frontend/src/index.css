@@ -22,12 +22,14 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--sans);
+  overflow: hidden;
 }
 
 .app {
   min-height: 100%;
   display: flex;
   flex-direction: column;
+  
 }
 
 .top,
@@ -48,6 +50,8 @@ body {
 
 .stage {
   flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .eyebrow {
