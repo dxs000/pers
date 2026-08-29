@@ -8,6 +8,8 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [log, setLog] = useState([]);
 
+  const busy = status?.state === "waiting" && !status?.timeout;
+
   useEffect(() => {
     if (inboxId == null) return;
     setStatus({ state: "waiting", text: null });
@@ -63,9 +65,10 @@ export default function App() {
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
+          disabled={busy}   
           autoFocus
         />
-        <button type="submit">Отправить</button>
+        <button type="submit" disabled={busy} >Отправить</button>
         {inboxId != null && <p>inbox #{inboxId}</p>}
       </form>
       {status?.state === "dropped" && (
