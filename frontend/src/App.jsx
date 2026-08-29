@@ -6,6 +6,7 @@ export default function App() {
   const [text, setText] = useState("");
   const [inboxId, setInboxId] = useState(null);
   const [status, setStatus] = useState(null);
+  const [log, setLog] = useState([]);
 
   useEffect(() => {
     if (inboxId == null) return;
@@ -24,6 +25,9 @@ export default function App() {
       if (data.state !== "waiting") {
         clearInterval(timer);
         setStatus(data);
+        if (data.state === "answered" && data.text) {
+          setLog((prev) => [...prev, { role: "assistant", text: data.text }]);
+        }
       }
     }
 
@@ -43,10 +47,18 @@ export default function App() {
     });
     const data = await res.json();
     setInboxId(data.id);
+    setLog((prev) => [...prev, { role: "user", text: value }]);
     setText("");
   }
   return (
     <>
+      <div>
+        {log.map((item, i) => (
+          <p key={i}>
+            {item.role === "user" ? "вы" : "агент"}: {item.text}
+          </p>
+        ))}
+      </div>
       <form onSubmit={send}>
         <input
           value={text}
