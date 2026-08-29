@@ -42,3 +42,11 @@ export async function readReply(replyId) {
   );
   return result.rows[0]?.text ?? null;
 }
+
+export async function readState(inboxId) {
+  const row = await readInbox(inboxId);
+  const state = inboxState(row);
+  if (state !== ANSWERED) return { state, text: null };
+  const text = await readReply(row.reply_id);
+  return { state, text };
+}
