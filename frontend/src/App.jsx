@@ -59,6 +59,11 @@ export default function App() {
         <div>
           <p className="eyebrow">очередь inbox</p>
           <h1>Реплика</h1>
+          <p className="sub">клиент пишет в inbox и читает ответ</p>
+        </div>
+        <div className="top-right">
+          <span>демон</span>
+          <span>экран</span>
         </div>
       </header>
 
