@@ -101,6 +101,9 @@ export default function App() {
           />
           <button type="submit" disabled={busy}>↑</button>
         </form>
+        <p className="hint">
+          Enter — отправить. Клиент только пишет в inbox и читает ответ.
+        </p>
         {status?.state === "dropped" && (
           <p>эти слова дошли, но уже к прошлому разговору</p>
         )}
