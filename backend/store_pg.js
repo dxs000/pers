@@ -4,6 +4,8 @@ import dotenv from "dotenv"
 export const WAITING = "waiting";
 export const ANSWERED = "answered";
 export const DROPPED = "dropped";
+export const CHANNEL_INBOX = "inbox_new";
+export const CHANNEL_REPLY = "reply_ready";
 
 dotenv.config();
 
@@ -49,4 +51,8 @@ export async function readState(inboxId) {
   if (state !== ANSWERED) return { state, text: null };
   const text = await readReply(row.reply_id);
   return { state, text };
+}
+
+export async function notify(channel, payload = "") {
+  await pool.query("SELECT pg_notify($1, $2)", [channel, payload]);
 }
