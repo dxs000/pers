@@ -26,3 +26,11 @@ export function inboxState(row) {
   if (row.reply_id != null) return ANSWERED;
   return DROPPED;
 }
+
+export async function readInbox(id) {
+  const result = await pool.query(
+    "SELECT handled_at, reply_id FROM inbox WHERE id = $1",
+    [id]
+  );
+  return result.rows[0] ?? null;
+}
