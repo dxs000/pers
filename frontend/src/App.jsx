@@ -68,7 +68,6 @@ export default function App() {
         <button type="submit">Отправить</button>
         {inboxId != null && <p>inbox #{inboxId}</p>}
       </form>
-      {status?.state === "answered" && <p>{status.text}</p>}
       {status?.state === "dropped" && (
         <p>эти слова дошли, но уже к прошлому разговору</p>
       )}
