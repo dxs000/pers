@@ -64,3 +64,28 @@ body {
   font-size: 1.7rem;
   font-weight: 500;
 }
+
+.stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.empty {
+  max-width: 28rem;
+  text-align: center;
+  padding: 1rem;
+}
+
+.empty h2 {
+  margin: 0 0 0.75rem;
+  font-family: var(--serif);
+  font-size: 1.6rem;
+  font-weight: 500;
+}
+
+.empty p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
