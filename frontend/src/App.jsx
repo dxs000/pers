@@ -53,33 +53,45 @@ export default function App() {
     setLog((prev) => [...prev, { role: "user", text: value }]);
     setText("");
   }
-  return (
-    <>
-      <div>
-        {log.map((item, i) => (
-          <p key={i}>
-            {item.role === "user" ? "вы" : "агент"}: {item.text}
-          </p>
-        ))}
-      </div>
-      <form onSubmit={send}>
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          disabled={busy}   
-          autoFocus
-        />
-        <button type="submit" disabled={busy} >Отправить</button>
-        {inboxId != null && <p>inbox #{inboxId}</p>}
-      </form>
-      {busy && <p>персонаж думает…</p>}
-      {status?.state === "dropped" && (
-        <p>эти слова дошли, но уже к прошлому разговору</p>
-      )}
-      {status?.timeout && (
-        <p>нет ответа за 180 с — похоже, агент не запущен</p>
-      )}
-    </>
-  );  
+    return (
+    <div className="app">
+      <header className="top">
+        <div>
+          <p className="eyebrow">очередь inbox</p>
+          <h1>Реплика</h1>
+        </div>
+      </header>
+
+      <main className="stage">
+        <div className="log">
+          {log.map((item, i) => (
+            <p key={i}>
+              {item.role === "user" ? "вы" : "агент"}: {item.text}
+            </p>
+          ))}
+        </div>
+      </main>
+
+      <footer className="composer">
+        <form onSubmit={send}>
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            disabled={busy}
+            autoFocus
+            placeholder="Напишите реплику"
+          />
+          <button type="submit" disabled={busy}>↑</button>
+        </form>
+        {status?.state === "dropped" && (
+          <p>эти слова дошли, но уже к прошлому разговору</p>
+        )}
+        {status?.timeout && (
+          <p>нет ответа за 180 с — похоже, агент не запущен</p>
+        )}
+        {busy && <p>персонаж думает…</p>}
+      </footer>
+    </div>
+  );
  
 }
