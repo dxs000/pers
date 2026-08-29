@@ -177,3 +177,15 @@ body {
   margin: 0;
   line-height: 1.55;
 }
+
+.log .user {
+  align-self: flex-end;
+  max-width: 80%;
+  color: var(--muted);
+}
+
+.log .assistant {
+  font-family: var(--serif);
+  font-size: 1.15rem;
+  line-height: 1.6;
+}
