@@ -157,6 +157,17 @@ class PgEngine:
     def last_exchange(self):
         return self._pg.last_exchange(self.conn)
 
+    def last_search_ts(self):
+        row = self.conn.execute(
+            "SELECT last_search_ts FROM agent WHERE id = 1"
+        ).fetchone()
+        return row["last_search_ts"] if row else None
+
+    def mark_search(self, now: datetime) -> None:
+        self.conn.execute(
+        "UPDATE agent SET last_search_ts = %s WHERE id = 1", (now,)
+    )
+    
     def session_stale(self, now: datetime) -> bool:
         return self._pg.session_stale(self.conn, now)
 

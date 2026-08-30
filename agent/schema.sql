@@ -186,7 +186,8 @@ CREATE TABLE agent (
     -- вается целиком, в objects ничего не кладёт. JSONB, потому что форма
     -- принадлежит рендеру (`_outside_changes`), а не хранилищу.
     outside_latch    JSONB,
-    last_exchange_ts TIMESTAMPTZ
+    last_exchange_ts TIMESTAMPTZ,
+    last_search_ts   TIMESTAMPTZ
 );
 INSERT INTO agent (id) VALUES (1);
 
