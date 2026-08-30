@@ -6,3 +6,5 @@ frontend/.env
 frontend/.env.*
 !frontend/.env.example
 frontend/node_modules/
+agent/.env.*
+!agent/.env.example
