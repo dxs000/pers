@@ -1,13 +1,19 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { pushInbox, readState, notify, readOpenSessionMessages, CHANNEL_INBOX } from "./store_pg.js";
+import { pushInbox, readState, notify, readOpenSessionMessages, listenReplies, CHANNEL_INBOX } from "./store_pg.js";
 
 dotenv.config();
 
 const PORT = process.env.PORT || 8800
 
 const app = express();
+
+const subscribers = new Set();
+
+listenReplies(() => broadcast()).catch((err) => {
+  console.error("LISTEN reply_ready:", err);
+});
 
 app.use(express.json());
 app.use(cors({ origin: "http://localhost:5173" }));
@@ -36,6 +42,21 @@ app.get("/session", async (_req, res) => {
   const messages = await readOpenSessionMessages();
   res.json({ messages });
 });
+
+app.get("/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  subscribers.add(res);
+  req.on("close", () => subscribers.delete(res));
+});
+
+function broadcast() {
+  for (const res of subscribers) {
+    res.write("event: reply\ndata: {}\n\n");
+  }
+}
 
 app.listen(PORT, () => {
     console.log(`Server running at port ${PORT}`);

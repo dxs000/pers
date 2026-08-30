@@ -21,30 +21,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+  const src = new EventSource(`${API}/events`);
+  src.addEventListener("reply", async () => {
+    await loadSession();
     if (inboxId == null) return;
-    setStatus({ state: "waiting", text: null });
-    const started = Date.now();
-    let timer;
-
-    async function tick() {
-      if (Date.now() - started > 180_000) {
-        clearInterval(timer);
-        setStatus({ state: "waiting", text: null, timeout: true });
-        return;
-      }
-      const res = await fetch(`${API}/inbox/${inboxId}`);
-      const data = await res.json();
-      if (data.state !== "waiting") {
-        clearInterval(timer);
-        setStatus(data);
-        await loadSession();
-      }
-    }
-
-    tick();
-    timer = setInterval(tick, 2000);
-    return () => clearInterval(timer);
-  }, [inboxId]);
+    const res = await fetch(`${API}/inbox/${inboxId}`);
+    const data = await res.json();
+    if (data.state !== "waiting") setStatus(data);
+  });
+  return () => src.close();
+}, [inboxId]);
 
   async function send(e) {
     e.preventDefault();

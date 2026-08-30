@@ -76,3 +76,13 @@ export async function readOpenSessionMessages() {
   );
   return result.rows;
 }
+
+export async function listenReplies(onReply) {
+  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  await client.connect();
+  client.on("notification", (msg) => {
+    if (msg.channel === CHANNEL_REPLY) onReply(msg.payload || "");
+  });
+  await client.query(`LISTEN ${CHANNEL_REPLY}`);
+  return client;
+}
