@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const API = import.meta.env.VITE_API_URL;
 
@@ -7,6 +7,7 @@ export default function App() {
   const [inboxId, setInboxId] = useState(null);
   const [status, setStatus] = useState(null);
   const [log, setLog] = useState([]);
+  const inboxIdRef = useRef(null);
 
   const busy = status?.state === "waiting" && !status?.timeout;
 
@@ -17,20 +18,33 @@ export default function App() {
   }
 
   useEffect(() => {
+    inboxIdRef.current = inboxId;
+  }, [inboxId]);
+
+  useEffect(() => {
     loadSession();
   }, []);
 
   useEffect(() => {
-  const src = new EventSource(`${API}/events`);
-  src.addEventListener("reply", async () => {
-    await loadSession();
-    if (inboxId == null) return;
-    const res = await fetch(`${API}/inbox/${inboxId}`);
-    const data = await res.json();
-    if (data.state !== "waiting") setStatus(data);
-  });
-  return () => src.close();
-}, [inboxId]);
+    const src = new EventSource(`${API}/events`);
+    src.addEventListener("reply", async () => {
+      await loadSession();
+      const id = inboxIdRef.current;
+      if (id == null) return;
+      const res = await fetch(`${API}/inbox/${id}`);
+      const data = await res.json();
+      if (data.state !== "waiting") setStatus(data);
+    });
+    return () => src.close();
+  }, []);
+
+  useEffect(() => {
+    if (status?.state !== "waiting" || status?.timeout) return;
+    const timer = setTimeout(() => {
+      setStatus({ state: "waiting", text: null, timeout: true });
+    }, 180_000);
+    return () => clearTimeout(timer);
+  }, [status]);
 
   async function send(e) {
     e.preventDefault();
@@ -44,6 +58,7 @@ export default function App() {
     const data = await res.json();
     if (!res.ok || data.id == null) return;
     setLog((prev) => [...prev, { role: "user", text: value }]);
+    setStatus({ state: "waiting", text: null });
     setInboxId(data.id);
     setText("");
   }
