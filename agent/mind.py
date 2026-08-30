@@ -183,7 +183,7 @@ def reflect_mood(turn: Turn, user_text:str, answer:str, client) -> str | None:
 
     try:
         response = client.chat.completions.create(
-            model = config.DEEPSEEK_MODEL_LIGH,
+            model = config.DEEPSEEK_MODEL_LIGHT,
             messages=[{"role":"user", "content":prompt}],
             extra_body={"thinking": {"type": "disabled"}}
         )
@@ -204,7 +204,7 @@ def reflect_self(turn: Turn, user_text: str, answer: str, client) -> list[dict]:
     prompt = _build_reflector_prompt(turn, user_text, answer)
     try:
         response = client.chat.completions.create(
-            model = config.DEEPSEEK_MODEL_LIGH,
+            model = config.DEEPSEEK_MODEL_LIGHT,
             messages=[{"role":"user", "content":prompt}],
             extra_body={"thinking": {"type": "disabled"}}
         )
@@ -221,7 +221,7 @@ def extract_objects(turn: Turn, user_text:str, answer:str, client,
     prompt = _build_extractor_prompt(turn, user_text, answer, findings)
     try:
         response = client.chat.completions.create(
-            model = config.DEEPSEEK_MODEL_LIGH,
+            model = config.DEEPSEEK_MODEL_LIGHT,
             messages=[{"role":"user", "content":prompt}],
             extra_body={"thinking": {"type": "disabled"}}
         )
@@ -679,7 +679,7 @@ def summarize_session(turn: Turn, buffer: dict, client) -> str | None:
 
     try:
         response = client.chat.completions.create(
-            model=config.DEEPSEEK_MODEL_LIGH,
+            model=config.DEEPSEEK_MODEL_LIGHT,
             messages=[{"role": "user", "content": prompt}],
             extra_body={"thinking": {"type": "disabled"}},
         )
@@ -826,7 +826,7 @@ def decide_query(user_text: str, objects: list[dict], client) -> str | None:
 
     try:
         response = client.chat.completions.create(
-            model=config.DEEPSEEK_MODEL_LIGH,
+            model=config.DEEPSEEK_MODEL_LIGHT,
             messages=[{"role": "user", "content": _build_retriever_prompt(text, objects)}],
             extra_body={"thinking": {"type": "disabled"}},
         )
