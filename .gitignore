@@ -8,3 +8,7 @@ frontend/.env.*
 frontend/node_modules/
 agent/.env.*
 !agent/.env.example
+agent/.python-version
+agent/__pycache__/
+.env.*
+

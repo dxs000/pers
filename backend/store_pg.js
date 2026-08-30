@@ -56,3 +56,23 @@ export async function readState(inboxId) {
 export async function notify(channel, payload = "") {
   await pool.query("SELECT pg_notify($1, $2)", [channel, payload]);
 }
+
+export async function readOpenSessionMessages() {
+  const session = await pool.query(
+    `SELECT id
+       FROM sessions
+      WHERE closed_at IS NULL
+      ORDER BY id DESC
+      LIMIT 1`
+  );
+  if (!session.rows[0]) return [];
+
+  const result = await pool.query(
+    `SELECT id, role, text, ts
+       FROM messages
+      WHERE session_id = $1
+      ORDER BY id ASC`,
+    [session.rows[0].id]
+  );
+  return result.rows;
+}

@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { pushInbox, readState, notify, CHANNEL_INBOX } from "./store_pg.js";
+import { pushInbox, readState, notify, readOpenSessionMessages, CHANNEL_INBOX } from "./store_pg.js";
 
 dotenv.config();
 
@@ -30,6 +30,11 @@ app.get("/inbox/:id", async (req, res) => {
     return;
   }
   res.json(await readState(id));
+});
+
+app.get("/session", async (_req, res) => {
+  const messages = await readOpenSessionMessages();
+  res.json({ messages });
 });
 
 app.listen(PORT, () => {

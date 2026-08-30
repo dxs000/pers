@@ -10,6 +10,16 @@ export default function App() {
 
   const busy = status?.state === "waiting" && !status?.timeout;
 
+  async function loadSession() {
+    const res = await fetch(`${API}/session`);
+    const data = await res.json();
+    setLog(data.messages ?? []);
+  }
+
+  useEffect(() => {
+    loadSession();
+  }, []);
+
   useEffect(() => {
     if (inboxId == null) return;
     setStatus({ state: "waiting", text: null });
@@ -27,9 +37,7 @@ export default function App() {
       if (data.state !== "waiting") {
         clearInterval(timer);
         setStatus(data);
-        if (data.state === "answered" && data.text) {
-          setLog((prev) => [...prev, { role: "assistant", text: data.text }]);
-        }
+        await loadSession();
       }
     }
 
@@ -49,11 +57,12 @@ export default function App() {
     });
     const data = await res.json();
     if (!res.ok || data.id == null) return;
-    setInboxId(data.id);
     setLog((prev) => [...prev, { role: "user", text: value }]);
+    setInboxId(data.id);
     setText("");
   }
-    return (
+
+  return (
     <div className="app">
       <header className="top">
         <div>
@@ -82,9 +91,9 @@ export default function App() {
         ) : (
           <div className="log">
             {log.map((item, i) => (
-              <p key={i} className={item.role}>
-              {item.text}
-            </p>
+              <p key={item.id ?? i} className={item.role}>
+                {item.text}
+              </p>
             ))}
           </div>
         )}
@@ -121,5 +130,4 @@ export default function App() {
       </footer>
     </div>
   );
- 
 }
