@@ -1,9 +1,4 @@
-"""Демон: процесс, который живёт, пока включён сервер (Шаг 29).
-
-`main.py` расщеплён надвое. Сюда переехало всё, что делает персонажа
-персонажем, — петля, разрешение места, границы сессии; в `cli.py` осталась
-оболочка, и она теперь просто клиент.
-"""
+"""Демон: процесс, который живёт, пока включён сервер (Шаг 29)."""
 
 import logging
 import signal
@@ -51,28 +46,23 @@ def resolve_place(eng, edges: cycle.Edges, now: datetime) -> bool:
     name = place.get("label")
     if not name or (place.get("lat") is not None and place.get("lon") is not None):
         return False
-
     try:
         found = outside.geocode(name, edges.http)
     except Exception as err:
         logging.warning("resolve_place: геокодер не ответил: %s", err)
         return False
-
     if not found:
         return False
-
     place["lat"] = found["lat"]
     place["lon"] = found["lon"]
     place["source"] = found["source"]
     place["resolved_at"] = now.isoformat()
-
     where = ", ".join(p for p in (found["label"], found["admin1"], found["country"]) if p)
     if _norm_place(found["label"]) != _norm_place(name):
         place["asked"] = name
         logging.warning("место разрешено с расхождением: %r -> %s", name, where)
     else:
         logging.info("место разрешено: %s (%.4f, %.4f)", where, found["lat"], found["lon"])
-
     place["label"] = found["label"]
     with eng.unit():
         eng.save_place(place)
@@ -89,7 +79,6 @@ def finish_session(eng, now: datetime, client) -> dict | None:
             summary = summarize_session(eng.snapshot(now), buf, client)
         except Exception as err:
             logging.warning("finish_session: выжимка не собралась: %s", err)
-
     with eng.unit():
         episode = eng.close_session(now, summary)
     if episode:
@@ -101,7 +90,6 @@ def finish_session(eng, now: datetime, client) -> dict | None:
 
 
 def drain(eng, edges: cycle.Edges) -> None:
-    """Разобрать очередь до дна."""
     while not _STOP:
         now = datetime.now(timezone.utc)
         outcome = cycle.handle_pending(
@@ -112,6 +100,8 @@ def drain(eng, edges: cycle.Edges) -> None:
                 eng, datetime.now(timezone.utc), edges.llm),
         )
         if outcome is None:
+            if cycle.digest_one(eng, edges, now):
+                continue
             return
         if outcome.error:
             logging.warning(
@@ -127,9 +117,7 @@ def serve(eng, edges: cycle.Edges) -> None:
     store_pg.listen(eng.conn, store_pg.CHANNEL_INBOX)
     logging.info("слушаю канал %s, пробуждение не реже %.0f с",
                  store_pg.CHANNEL_INBOX, POLL_SECONDS)
-
     drain(eng, edges)
-
     while not _STOP:
         for note in eng.conn.notifies(timeout=POLL_SECONDS, stop_after=1):
             logging.debug("уведомление: %s", note.channel)
@@ -143,16 +131,13 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
-
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
-
     try:
         edges = cycle.open_edges()
     except RuntimeError as err:
         logging.error("%s", err)
         return 1
-
     try:
         eng = engine_mod.open_engine()
     except Exception as err:
@@ -160,13 +145,10 @@ def main() -> int:
         edges.close()
         return 1
     logging.info("хранилище: %s", eng.name)
-
     boot = datetime.now(timezone.utc)
     resolve_place(eng, edges, boot)
-
     if eng.session_stale(boot):
         finish_session(eng, boot, edges.llm)
-
     place = eng.place()
     if place.get("label") and sky.local_snapshot(
             place.get("lat"), place.get("lon"), boot, config.TZ) is None:
@@ -174,7 +156,6 @@ def main() -> int:
             "место задано именем (%s), но координат нет: геокодер не помог и "
             "APP_LAT/APP_LON не разобраны — блок среды выключен", place["label"]
         )
-
     logging.info("%s поднят", config.APP_NAME)
     try:
         serve(eng, edges)

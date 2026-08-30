@@ -963,3 +963,40 @@ def close_session(conn, now, summary: str | None = None) -> dict | None:
         "exchanges": ep["exchanges"],
         "summary": ep["summary"],
     }
+
+def enqueue_digest(conn, reply_id, findings) -> None:
+    conn.execute(
+        "INSERT INTO followups (reply_id, findings) VALUES (%s, %s)",
+        (reply_id, json.dumps(findings) if findings is not None else None),
+    )
+
+
+def next_digest(conn):
+    return conn.execute(
+        "SELECT id, reply_id, findings FROM followups "
+        "WHERE done_at IS NULL ORDER BY id LIMIT 1"
+    ).fetchone()
+
+
+def mark_digest_done(conn, followup_id, now) -> None:
+    conn.execute(
+        "UPDATE followups SET done_at = %s WHERE id = %s",
+        (now, followup_id),
+    )
+
+
+def exchange_by_reply(conn, reply_id):
+    return conn.execute(
+        """
+        SELECT u.text AS user_text, a.text AS answer
+          FROM messages a
+          JOIN messages u
+            ON u.session_id = a.session_id
+           AND u.role = 'user'
+           AND u.id < a.id
+         WHERE a.id = %s AND a.role = 'assistant'
+         ORDER BY u.id DESC
+         LIMIT 1
+        """,
+        (reply_id,),
+    ).fetchone()

@@ -251,3 +251,12 @@ CREATE INDEX inbox_pending_idx ON inbox (id) WHERE handled_at IS NULL;
 -- нет. Дыра терпима именно здесь, потому что `messages` хранит разговор
 -- целиком: факты выводимы из записи, запись из фактов — нет. Восстановитель-
 -- ный проход и водяной знак `agent.digested_through` отложены в 3c вместе.
+
+CREATE TABLE followups (
+    id         BIGSERIAL PRIMARY KEY,
+    reply_id   BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    findings   JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    done_at    TIMESTAMPTZ
+);
+CREATE INDEX followups_pending_idx ON followups (id) WHERE done_at IS NULL;
