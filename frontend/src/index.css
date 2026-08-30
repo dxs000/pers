@@ -102,18 +102,24 @@ body {
   margin: 0 auto;
 }
 
-.composer input {
+.composer input,
+.composer textarea {
   flex: 1;
   border: 0;
   outline: 0;
+  resize: none;
   background: #2a241f;
   color: var(--fg);
-  border-radius: 999px;
+  border-radius: 1.4rem;
   padding: 0.85rem 1.2rem;
   font: inherit;
+  line-height: 1.4;
+  max-height: 8rem;
+  overflow: auto;
 }
 
-.composer input::placeholder {
+.composer input::placeholder,
+.composer textarea::placeholder {
   color: var(--muted);
 }
 
@@ -129,7 +135,8 @@ body {
 }
 
 .composer button:disabled,
-.composer input:disabled {
+.composer input:disabled,
+.composer textarea:disabled {
   opacity: 0.5;
   cursor: default;
 }
