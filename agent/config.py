@@ -34,6 +34,7 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # `.env` первый же запрос уходит именно с ним, и опечатка вылезает
 # невнятной ошибкой провайдера в момент, когда отлаживаешь совсем другое.
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_MODEL_LIGHT = os.getenv("DEEPSEEK_MODEL_LIGHT", DEEPSEEK_MODEL)
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "60.0"))
 
