@@ -1,0 +1,58 @@
+МАРШРУТЫ
+GET /api/overview                                | 200 OK   | application/json; charset=utf-8 | тело == inspector.overview(NOW): да
+GET /api/objects                                 | 200 OK   | application/json; charset=utf-8 | тело == inspector.objects(NOW): да
+GET /api/objects?at=2026-01-16T09%3A00%3A00%2B00%3A00 | 200 OK   | application/json; charset=utf-8 | тело == inspector.objects(NOW+24ч): да
+GET /api/objects/0/facts                         | 200 OK   | application/json; charset=utf-8 | тело == inspector.facts(0): да
+GET /api/objects/1/facts                         | 200 OK   | application/json; charset=utf-8 | тело == inspector.facts(1): да
+GET /api/episodes                                | 200 OK   | application/json; charset=utf-8 | тело == inspector.episodes(): да
+GET /api/episodes?limit=2                        | 200 OK   | application/json; charset=utf-8 | тело == inspector.episodes(2): да
+GET /api/sessions                                | 200 OK   | application/json; charset=utf-8 | тело == inspector.sessions(): да
+GET /api/sessions/1/messages                     | 200 OK   | application/json; charset=utf-8 | тело == inspector.conversation(1): да
+GET /api/queue                                   | 200 OK   | application/json; charset=utf-8 | тело == inspector.queue(): да
+GET /api/prompt                                  | 200 OK   | application/json; charset=utf-8 | тело == inspector.prompt(NOW): да
+============================================================
+ОТКАЗЫ
+GET /api/nope                                        | 404 Not Found   (опечатка в пути)
+    {
+      "error": "нет такого маршрута",
+      "path": "/api/nope"
+    }
+GET /api/objects/abc/facts                           | 404 Not Found   (id не число — маршрута нет)
+    {
+      "error": "нет такого маршрута",
+      "path": "/api/objects/abc/facts"
+    }
+POST /api/overview                                    | 405 Method Not Allowed | Allow: GET   (метод; заголовок Allow обязателен)
+    {
+      "error": "только GET",
+      "method": "POST"
+    }
+POST /api/nope                                        | 404 Not Found   (метод на несуществующем пути — 404, а не 405)
+    {
+      "error": "нет такого маршрута",
+      "path": "/api/nope"
+    }
+GET /api/prompt?at=%D0%BD%D0%B5-%D0%B4%D0%B0%D1%82%D0%B0 | 400 Bad Request   (at не разбирается)
+    {
+      "error": "at: не разбирается как ISO-8601: 'не-дата'"
+    }
+GET /api/prompt?at=2026-01-15T09%3A00%3A00           | 400 Bad Request   (at без пояса — момент неоднозначен)
+    {
+      "error": "at: нужен пояс, иначе момент неоднозначен: '2026-01-15T09:00:00'"
+    }
+GET /api/episodes?limit=abc                          | 400 Bad Request   (limit не число)
+    {
+      "error": "limit: нужно целое, получено 'abc'"
+    }
+GET /api/episodes?limit=0                            | 400 Bad Request   (limit не положительный)
+    {
+      "error": "limit: нужно положительное, получено 0"
+    }
+============================================================
+ОБЪЕКТА НЕТ
+GET /api/objects/999/facts | 200 OK
+[]
+============================================================
+СОЕДИНЕНИЯ
+открыто 12, закрыто 12
+запись отклонена базой: ReadOnlySqlTransaction, SQLSTATE 25006

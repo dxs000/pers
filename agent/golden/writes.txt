@@ -1,0 +1,260 @@
+{
+  "name": "Костя",
+  "traits": [
+    "внимательный",
+    "ироничный",
+    "упрямый"
+  ],
+  "mood": "сосредоточенное",
+  "place_label": "Тбилиси",
+  "self_assertions": [
+    {
+      "key": "name",
+      "value": "Костя",
+      "confidence": "high",
+      "hits": 3,
+      "ts": "2026-01-02T21:00:00+00:00",
+      "source": "self"
+    },
+    {
+      "key": "occupation",
+      "value": "редактор",
+      "confidence": "high",
+      "hits": 2,
+      "ts": "2026-01-04T23:00:00+00:00",
+      "source": "self"
+    },
+    {
+      "key": "value",
+      "value": "точность",
+      "confidence": "med",
+      "hits": 2,
+      "ts": "2026-01-15T10:00:00+00:00",
+      "source": "self"
+    },
+    {
+      "key": "style",
+      "value": "отвечает вопросом на вопрос",
+      "confidence": "med",
+      "hits": 2,
+      "ts": "2026-01-13T17:00:00+00:00",
+      "source": "self"
+    },
+    {
+      "key": "tic",
+      "value": "переспрашивает даты",
+      "confidence": "low",
+      "hits": 1,
+      "ts": "2026-01-14T23:00:00+00:00",
+      "source": "self"
+    },
+    {
+      "key": "focus",
+      "value": "возвращается к началу разговора",
+      "confidence": "med",
+      "hits": 1,
+      "ts": "2026-01-15T10:00:00+00:00",
+      "source": "self"
+    }
+  ],
+  "outside_latch": {
+    "ts": "2026-01-15T08:00:00+00:00",
+    "light": "day",
+    "weather": "clear"
+  },
+  "episodes": [
+    {
+      "id": "ep_1",
+      "started_at": "2025-10-23T15:00:00+00:00",
+      "ended_at": "2025-10-24T01:00:00+00:00",
+      "exchanges": 12,
+      "summary": "Первый разговор, ещё присматривались друг к другу."
+    },
+    {
+      "id": "ep_2",
+      "started_at": "2026-01-02T16:00:00+00:00",
+      "ended_at": "2026-01-02T21:00:00+00:00",
+      "exchanges": 20,
+      "summary": "Спорили про Чернышевского, и я горячился — вышло резче, чем хотел."
+    },
+    {
+      "id": "ep_3",
+      "started_at": "2026-01-12T18:00:00+00:00",
+      "ended_at": "2026-01-12T21:00:00+00:00",
+      "exchanges": 8,
+      "summary": "Он принёс кофе, говорили о ерунде, было легко."
+    },
+    {
+      "id": "ep_4",
+      "started_at": "2026-01-14T11:00:00+00:00",
+      "ended_at": "2026-01-14T13:00:00+00:00",
+      "exchanges": 5,
+      "summary": null
+    },
+    {
+      "id": "ep_5",
+      "started_at": "2026-01-15T03:00:00+00:00",
+      "ended_at": "2026-01-15T04:00:00+00:00",
+      "exchanges": 14,
+      "summary": "Начали с погоды, а съехали на Набокова, и я увлёкся."
+    }
+  ],
+  "objects": [
+    {
+      "id": "obj_1",
+      "type": "person",
+      "label": "Анна",
+      "last_seen": "2026-01-15T10:00:00+00:00",
+      "assertions": [
+        {
+          "key": "occupation",
+          "value": "бэкенд-разработчик",
+          "confidence": "high",
+          "hits": 6,
+          "ts": "2026-01-15T10:00:00+00:00",
+          "source": "user",
+          "confirmed": true
+        },
+        {
+          "key": "occupation",
+          "value": "тимлид",
+          "confidence": "high",
+          "hits": 1,
+          "ts": "2026-01-13T07:00:00+00:00",
+          "source": "user"
+        },
+        {
+          "key": "city",
+          "value": "Тбилиси",
+          "confidence": "high",
+          "hits": 2,
+          "ts": "2026-01-14T03:00:00+00:00",
+          "source": "web"
+        },
+        {
+          "key": "hobby",
+          "value": "скалолазание",
+          "confidence": "med",
+          "hits": 1,
+          "ts": "2026-01-11T05:00:00+00:00",
+          "source": "user"
+        },
+        {
+          "key": "mood_today",
+          "value": "устала",
+          "confidence": "low",
+          "hits": 1,
+          "ts": "2026-01-15T07:00:00+00:00",
+          "source": "user"
+        },
+        {
+          "key": "city",
+          "value": "Ереван",
+          "confidence": "med",
+          "hits": 1,
+          "ts": "2026-01-15T10:00:00+00:00",
+          "source": "user"
+        }
+      ]
+    },
+    {
+      "id": "obj_2",
+      "type": "place",
+      "label": "Тбилиси",
+      "last_seen": "2026-01-15T10:00:00+00:00",
+      "assertions": [
+        {
+          "key": "country",
+          "value": "Грузия",
+          "confidence": "high",
+          "hits": 3,
+          "ts": "2026-01-14T03:00:00+00:00",
+          "source": "user"
+        },
+        {
+          "key": "fact",
+          "value": "самый населённый город страны",
+          "confidence": "med",
+          "hits": 1,
+          "ts": "2026-01-14T03:00:00+00:00",
+          "source": "web"
+        },
+        {
+          "key": "fact",
+          "value": "стоит на Куре",
+          "confidence": "med",
+          "hits": 1,
+          "ts": "2026-01-15T10:00:00+00:00",
+          "source": "user"
+        }
+      ]
+    },
+    {
+      "id": "obj_5",
+      "type": "topic",
+      "label": "Пруст",
+      "last_seen": "2026-01-15T10:00:00+00:00",
+      "assertions": [
+        {
+          "key": "work",
+          "value": "В поисках утраченного времени",
+          "confidence": "high",
+          "hits": 1,
+          "ts": "2026-01-15T10:00:00+00:00",
+          "source": "user"
+        }
+      ]
+    },
+    {
+      "id": "obj_3",
+      "type": "topic",
+      "label": "Набоков",
+      "last_seen": "2026-01-07T01:00:00+00:00",
+      "assertions": [
+        {
+          "key": "work",
+          "value": "Дар",
+          "confidence": "high",
+          "hits": 2,
+          "ts": "2026-01-07T01:00:00+00:00",
+          "source": "user"
+        }
+      ]
+    }
+  ],
+  "registry": [
+    {
+      "id": "obj_1",
+      "label": "Анна",
+      "aliases": [
+        "Аня",
+        "Анечка",
+        "Анюта"
+      ]
+    },
+    {
+      "id": "obj_2",
+      "label": "Тбилиси",
+      "aliases": [
+        "Тифлис"
+      ]
+    },
+    {
+      "id": "obj_3",
+      "label": "Набоков",
+      "aliases": []
+    },
+    {
+      "id": "obj_4",
+      "label": "кофе",
+      "aliases": []
+    },
+    {
+      "id": "obj_5",
+      "label": "Пруст",
+      "aliases": [
+        "Marcel Proust"
+      ]
+    }
+  ]
+}
