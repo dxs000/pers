@@ -99,6 +99,30 @@ class PgEngine:
                         arrived_at: datetime | None = None) -> int:
         return self._pg.append_exchange(self.conn, user_text, answer, now, arrived_at)
 
+    # --- Инициатива (Шаг 35) ------------------------------------------------
+    def append_utterance(self, text: str, now: datetime) -> int:
+        return self._pg.append_utterance(self.conn, text, now)
+
+    def last_utterance(self):
+        return self._pg.last_utterance(self.conn)
+
+    def utterances_since(self, since: datetime) -> int:
+        return self._pg.utterances_since(self.conn, since)
+
+    def record_urge(self, kind: str, subject, amount: float, now: datetime,
+                    mode: str = "bump", expires_at=None) -> None:
+        self._pg.record_urge(self.conn, kind, subject, amount, now,
+                             mode=mode, expires_at=expires_at)
+
+    def strongest_impulse(self, now: datetime, floor: float):
+        return self._pg.strongest_impulse(self.conn, now, floor)
+
+    def mark_spoken(self, impulse_id: int, now: datetime, damp: float) -> None:
+        self._pg.mark_spoken(self.conn, impulse_id, now, damp)
+
+    def open_impulses(self) -> list[dict]:
+        return self._pg.open_impulses(self.conn)
+
     def push(self, text: str, now: datetime) -> int:
         return self._pg.push_inbox(self.conn, text, now)
 

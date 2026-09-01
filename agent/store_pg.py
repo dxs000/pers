@@ -54,6 +54,17 @@ SALIENCE_FLOOR = 0.05
 
 SELF_ID = 0
 
+# Затухание побуждения. Форма та же, что у важности объектов
+# (`effective_salience`), и намеренно: повод, о котором ничто не напоминает,
+# слабеет так же, как объект, о котором не говорят. Период вдвое короче
+# суток — новость живёт меньше, чем знакомство.
+#
+# Живёт ЗДЕСЬ, а не в `cycle`, потому что применяется внутри SQL-выражения
+# `bump_impulse`. Порог, при котором персонаж решает заговорить, — наоборот в
+# `cycle`: база хранит побуждение, решает цикл.
+IMPULSE_DECAY_BASE = 0.5
+IMPULSE_HALFLIFE_HOURS = 12.0
+
 
 def connect(dsn: str | None = None, *, test: bool = False,
             read_only: bool = False) -> psycopg.Connection:
@@ -272,8 +283,21 @@ def _fill_fixture(conn, state: dict) -> None:
     self = state.get("self", {})
     place = self.get("place", {})
 
-    conn.execute("TRUNCATE objects, assertions, episodes, aliases, sessions, messages "
-                 "RESTART IDENTITY CASCADE")
+    # `impulses` перечислена ЯВНО, и это не избыточность. Остальные таблицы
+    # очереди и переваривания (`inbox`, `followups`) сюда доезжают через
+    # CASCADE — у них есть внешний ключ на `messages`. У импульсов ключа нет
+    # и быть не должно: повод заговорить не принадлежит ни одной реплике, он
+    # существует до неё. Значит CASCADE до него не достаёт, и не назови его
+    # здесь — побуждения переживали бы заливку фикстура, копясь от сценария
+    # к сценарию и от прогона к прогону. Поймано сбруей на первом же
+    # повторном прогоне: сила импульса отличалась в третьем знаке.
+    #
+    # Это второй случай той же породы за два шага (первым был
+    # `agent.last_search_ts`). Общее правило: таблица, не связанная ключом с
+    # `messages`, обязана быть названа тут поимённо, иначе изоляция сценариев
+    # через неё течёт.
+    conn.execute("TRUNCATE objects, assertions, episodes, aliases, sessions, "
+                 "messages, impulses RESTART IDENTITY CASCADE")
     conn.execute(
         """
         -- `last_search_ts` сбрасывается в NULL, а не приезжает из фикстура:
@@ -657,6 +681,164 @@ def append_exchange(conn, user_text: str, answer: str, now, arrived_at=None) -> 
     return reply_id
 
 
+def append_utterance(conn, text: str, now) -> int:
+    """Записать реплику, сказанную по своей воле. ОДНА строка `messages`.
+
+    Второй канал записи рядом с `append_exchange`, и отдельный он не для
+    удобства. `append_exchange` пишет ДВЕ строки и тем утверждает, что у
+    сказанного персонажем есть причина в сказанном человеком. Для реплики,
+    начатой самим персонажем, это неправда, и подсунуть сюда пустую строку
+    `user` значило бы записать в разговор слова, которых никто не говорил, —
+    их прочитала бы и рабочая память, и выжимка, и экстрактор.
+
+    Сессия открывается той же функцией, что у обмена: персонаж, заговоривший
+    в тишину, начинает разговор — и если человек ответит, ответ ляжет в ту же
+    сессию, а не в новую.
+
+    `last_exchange_ts` здесь НЕ трогается, и это решение. Метка отвечает на
+    вопрос «когда мы в последний раз разговаривали» — её читает
+    `_render_silence` и по ней же копится побуждение `silence`. Обнови её
+    собственной репликой — и персонаж, заговорив в пустоту, решил бы, что
+    поговорил, а молчание началось бы заново. Он бы сам себя утешил.
+    """
+    sid = _open_session(conn, now)
+    mid = conn.execute(
+        "INSERT INTO messages (session_id, ts, role, text, spontaneous) "
+        "VALUES (%s, %s, 'assistant', %s, TRUE) RETURNING id",
+        (sid, now, (text or "").strip()),
+    ).fetchone()["id"]
+    conn.execute("UPDATE sessions SET ended_at = %s WHERE id = %s", (now, sid))
+    return mid
+
+
+def last_utterance(conn):
+    """Когда персонаж в последний раз заговорил сам. Ни разу — `None`.
+
+    Считается из `messages`, а не из колонки в `agent`. Колонка была бы
+    вторым фактом об одном событии, и разъехаться ей есть с чем: строку
+    может убрать Curator (Фаза 5), а счётчик остался бы.
+    """
+    row = conn.execute(
+        "SELECT max(ts) AS ts FROM messages WHERE spontaneous"
+    ).fetchone()
+    return row["ts"] if row else None
+
+
+def utterances_since(conn, since) -> int:
+    """Сколько раз заговорил сам начиная с момента. Бюджет суток считается им."""
+    return conn.execute(
+        "SELECT count(*) AS n FROM messages WHERE spontaneous AND ts >= %s",
+        (since,),
+    ).fetchone()["n"]
+
+
+# =============================================================================
+# Импульсы (Шаг 35): побуждение заговорить, которое копится
+# =============================================================================
+def record_urge(conn, kind: str, subject: str | None, amount: float, now,
+                mode: str = "bump", expires_at=None) -> None:
+    """Записать побуждение. `bump` — прибавить к накопленному, `set` — поверх.
+
+    Два режима, потому что поводы двух пород (см. `cycle.Urge`). Событие
+    прибавляется и тает; состояние вычисляется по настоящему и пишется
+    поверх, поэтому затухание к нему не применяется — оно бы вычло из
+    величины, которая уже верна на данный момент.
+
+    `ON CONFLICT` по частичному уникальному индексу, а не «выбрать и решить»:
+    check-then-insert здесь дал бы того же фантома, что у объектов и сессий,
+    и дал бы его тем вернее, что побуждение трогают каждый заход.
+
+    Конструкция индекса названа выражением, а не именем колонки:
+    `coalesce(subject, '')` — часть ключа, и вывести её Postgres не может.
+
+    Затухание применяется НА ЗАПИСИ, а не по таймеру: повод, о котором ничто
+    не напомнило, обязан слабеть сам, но заводить ради этого фоновую уборку
+    значило бы завести второго писателя. Тот же приём, что у
+    `web._evict_stale`: чистка на обращении.
+    """
+    if mode not in ("bump", "set"):
+        raise ValueError(f"record_urge: неизвестный режим {mode!r}")
+
+    # Затухание выражено в SQL, а не посчитано в Python, по той же причине,
+    # что и `effective_salience`: величина, лежащая в базе, должна пересчиты-
+    # ваться там же, где лежит, иначе между чтением и записью появляется щель.
+    grown = (
+        "impulses.urge * pow(%(base)s, greatest(EXTRACT(EPOCH FROM "
+        "(EXCLUDED.updated_at - impulses.updated_at)) / 3600.0, 0.0) "
+        "/ %(half)s) + EXCLUDED.urge"
+    )
+    conn.execute(
+        f"""
+        INSERT INTO impulses (kind, subject, urge, created_at, updated_at, expires_at)
+        VALUES (%(kind)s, %(subject)s, %(urge)s, %(now)s, %(now)s, %(exp)s)
+        ON CONFLICT (kind, coalesce(subject, '')) WHERE spoken_at IS NULL
+        DO UPDATE SET
+            urge = {grown if mode == "bump" else "EXCLUDED.urge"},
+            updated_at = EXCLUDED.updated_at,
+            expires_at = COALESCE(EXCLUDED.expires_at, impulses.expires_at)
+        """,
+        {"kind": kind, "subject": subject, "urge": amount, "now": now,
+         "exp": expires_at, "base": IMPULSE_DECAY_BASE,
+         "half": IMPULSE_HALFLIFE_HOURS},
+    )
+
+
+def strongest_impulse(conn, now, floor: float):
+    """Самый сильный несказанный повод выше порога. Протухшее не считается.
+
+    Протухшее не удаляется, а пропускается: строка — свидетельство, что повод
+    был, и по ней потом будет видно, о чём персонаж хотел заговорить и не
+    успел. Убирать её — работа Curator'а (Фаза 5), как и с эпизодами.
+    """
+    return conn.execute(
+        """
+        SELECT id, kind, subject, urge, created_at, updated_at
+          FROM impulses
+         WHERE spoken_at IS NULL
+           AND urge >= %s
+           AND (expires_at IS NULL OR expires_at > %s)
+         ORDER BY urge DESC, id
+         LIMIT 1
+        """,
+        (floor, now),
+    ).fetchone()
+
+
+def mark_spoken(conn, impulse_id: int, now, damp: float) -> None:
+    """Повод отработан. Соседние — приглушить.
+
+    Приглушение соседей не косметика: заговорив о погоде, персонаж заодно
+    нарушил и тишину, и оставить побуждение `silence` нетронутым значило бы
+    дать ему повод заговорить снова через минуту. Гасится всё несказанное,
+    а не только соседи того же рода, потому что человек услышал ОДНУ реплику,
+    а не реплику про погоду.
+    """
+    conn.execute("UPDATE impulses SET spoken_at = %s WHERE id = %s",
+                 (now, impulse_id))
+    conn.execute(
+        "UPDATE impulses SET urge = urge * %s WHERE spoken_at IS NULL",
+        (damp,),
+    )
+
+
+def open_impulses(conn) -> list[dict]:
+    """Все несказанные, сильные сверху. Для инспектора и сбруи."""
+    rows = conn.execute(
+        """
+        SELECT id, kind, subject, urge, created_at, updated_at, expires_at
+          FROM impulses WHERE spoken_at IS NULL
+         ORDER BY urge DESC, id
+        """
+    ).fetchall()
+    return [
+        {"id": r["id"], "kind": r["kind"], "subject": r["subject"],
+         "urge": round(float(r["urge"]), 3),
+         "created_at": iso(r["created_at"]), "updated_at": iso(r["updated_at"]),
+         "expires_at": iso(r["expires_at"])}
+        for r in rows
+    ]
+
+
 # =============================================================================
 # Очередь входящих (Шаг 28). Потребитель есть, демона ещё нет
 # =============================================================================
@@ -778,11 +960,28 @@ def session_stale(conn, now, gap_hours: float = SESSION_GAP_HOURS) -> bool:
 
 
 def summary_buffer(conn, limit: int = SUMMARY_EXCHANGES_LIMIT) -> dict:
-    """Буфер для суммаризатора: последние `limit` обменов + сколько скрыто.
+    """Разговор открытой сессии для суммаризатора: лента реплик + сколько скрыто.
 
-    Форма та же, что у `state["buffer"]`, потому что читатель тот же —
-    `_build_summarizer_prompt`. Буфер СОЗНАТЕЛЬНО не входит в снимок: он
-    вход хода, а не память, и `mind` получает его отдельным аргументом.
+    **Пар здесь больше не собирается (Шаг 35), и это исправление ошибки, а
+    не смена вкуса.** Прежний код брал строки по две — `rows[i]` считался
+    репликой человека, `rows[i + 1]` ответом, — и держался на предположении,
+    что роли строго чередуются. Предположение было верно ровно до тех пор,
+    пока персонаж только отвечал. С первой же сказанной по своей воле
+    репликой чередование ломается, и сборка пар не падает, а СЪЕЗЖАЕТ: чужая
+    реплика склеивается с чужим ответом, и суммаризатор получает разговор,
+    которого не было. Молча, и тем вернее, чем длиннее сессия.
+
+    Форма — та же, что у `working_memory`, и по той же причине, которая там
+    записана: «читать её лентой честнее, потому что сборка пар предполагает,
+    что строки идут строго по две». Один и тот же разговор двумя способами
+    читали два места; правым оказалось то, которое ничего не предполагало.
+
+    `spontaneous` доезжает до читателя: транскрипт обязан различать «его
+    спросили — он ответил» и «он заговорил сам». Без этого выжимка
+    приписывает собеседнику реплики, которых тот не подавал.
+
+    Буфер СОЗНАТЕЛЬНО не входит в снимок: он вход хода, а не память, и
+    `mind` получает его отдельным аргументом.
     """
     row = conn.execute(
         "SELECT id, started_at, dropped FROM sessions WHERE closed_at IS NULL "
@@ -792,18 +991,21 @@ def summary_buffer(conn, limit: int = SUMMARY_EXCHANGES_LIMIT) -> dict:
         return {}
 
     sid, lost = row["id"], row["dropped"]
+    # Счёт в РЕПЛИКАХ, а не в обменах: обмен перестал быть единицей разговора
+    # ровно тогда, когда появилась реплика без пары.
     total = conn.execute(
-        "SELECT count(*) AS n FROM messages WHERE session_id = %s AND role = 'user'",
+        "SELECT count(*) AS n FROM messages WHERE session_id = %s",
         (sid,),
     ).fetchone()["n"]
     if not total and not lost:
         return {}
 
-    # Пары «реплика — ответ» восстанавливаются порядком вставки: `id`
-    # монотонен, а обмен пишется двумя строками подряд в одной транзакции.
+    # `limit` в обменах, а лента в строках — отсюда `limit * 2`. Множитель
+    # остаётся прежним намеренно: он про то, сколько разговора влезает в
+    # промпт выжимки, и от смены единицы счёта эта величина не менялась.
     rows = conn.execute(
         """
-        SELECT ts, role, text FROM messages
+        SELECT ts, role, text, spontaneous FROM messages
          WHERE session_id = %s
          ORDER BY id DESC
          LIMIT %s
@@ -812,20 +1014,15 @@ def summary_buffer(conn, limit: int = SUMMARY_EXCHANGES_LIMIT) -> dict:
     ).fetchall()
     rows.reverse()
 
-    exchanges = []
-    for i in range(0, len(rows) - 1, 2):
-        user, assistant = rows[i], rows[i + 1]
-        exchanges.append({
-            "ts": iso(user["ts"]),
-            "user": user["text"],
-            "assistant": assistant["text"],
-        })
-
     return {
         "started_at": iso(row["started_at"]),
-        "exchanges": exchanges,
+        "messages": [
+            {"ts": iso(r["ts"]), "role": r["role"], "text": r["text"],
+             "spontaneous": r["spontaneous"]}
+            for r in rows
+        ],
         # Два слагаемых, и оба честные:
-        #   `total - len(exchanges)` — реплики ЕСТЬ в базе, но не показаны
+        #   `total - len(rows)` — реплики ЕСТЬ в базе, но не показаны
         #     (предел выжимки). Верно по построению, от согласованности
         #     констант не зависит.
         #   `lost` — реплик НЕТ вовсе. В жизни этого не бывает (база хранит
@@ -833,7 +1030,7 @@ def summary_buffer(conn, limit: int = SUMMARY_EXCHANGES_LIMIT) -> dict:
         #     будет у сессий, подчищенных Curator'ом (Фаза 5). Колонка
         #     `sessions.dropped` существует ровно для «знаем, что было
         #     больше, а текста нет».
-        "dropped": lost + max(0, total - len(exchanges)),
+        "dropped": lost + max(0, total - len(rows)),
     }
 
 
@@ -940,10 +1137,24 @@ def close_session(conn, now, summary: str | None = None) -> dict | None:
         return None
 
     sid = row["id"]
+    # Считаются реплики человека И сказанные персонажем по своей воле.
+    #
+    # До Шага 35 здесь стоял только `role = 'user'`, и это было верно, пока
+    # разговор состоял из обменов: каждая реплика человека тянула за собой
+    # ровно один ответ, и счёт по одной стороне давал длину разговора.
+    # С инициативой появился разговор, в котором реплик человека НОЛЬ —
+    # персонаж заговорил, ему не ответили, — и прежний счёт дал бы `total = 0`,
+    # то есть сессия закрылась бы БЕЗ эпизода. Монолог исчез бы из памяти
+    # целиком, причём молча: ветка «нечего записывать» выглядит как штатная.
+    #
+    # Ответы по-прежнему не считаются: они следствие реплики, а не событие
+    # разговора. Поэтому у сессий без инициативы число не изменилось ни на
+    # единицу — эталоны это подтверждают.
     stats = conn.execute(
         """
         SELECT count(*) AS n, min(ts) AS first_ts, max(ts) AS last_ts
-          FROM messages WHERE session_id = %s AND role = 'user'
+          FROM messages
+         WHERE session_id = %s AND (role = 'user' OR spontaneous)
         """,
         (sid,),
     ).fetchone()

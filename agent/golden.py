@@ -657,6 +657,11 @@ _INBOX_RACE_SCRIPT = [
 _WRITES = {"writes": _WRITE_SCRIPT, "session": None, "memory": None}
 _TURN = {"turn": None, "inbox": None, "client": None}
 
+# Восьмое семейство: инициатива (Шаг 35). Смотрит на то, чего не было ни у
+# одного из девятнадцати, — на ход, который НИКТО не запрашивал: персонаж
+# заговаривает сам, и единственный вход у этого хода — время.
+_INITIATIVE = {"initiative": None}
+
 # Шестое семейство: читающая сторона инспектора (Шаг 30). Смотрит не на
 # промпт и не на запись, а на ТРЕТИЙ выход из хранилища — тот, которым
 # Фаза 4a покажет память человеку.
@@ -667,7 +672,8 @@ _INSPECT = {"inspector": None}
 # нет намеренно — см. `_run_http`.
 _HTTP = {"http": None}
 
-SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INSPECT, **_HTTP}
+SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
+             **_INSPECT, **_HTTP}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
 #
@@ -1145,6 +1151,121 @@ def _run_inbox() -> str:
     )
 
 
+# --- Сценарий ИНИЦИАТИВЫ (Шаг 35) -------------------------------------------
+# Восьмое семейство. Единственный ход, у которого нет входа: реплики нет,
+# очереди нет, спрашивать некому — есть только время и то, что за окном.
+#
+# Моменты выбраны под пороги, а не под правдоподобие. Фикстур договорил за
+# 0.2 ч до NOW_REF, значит:
+#
+#   +30:00  тихо 30.2 ч -> сила 1.76 при пороге 1.0. Говорит.
+#   +30:10  через десять минут — пауза UTTERANCE_COOLDOWN_HOURS (2 ч). Молчит.
+#   +34:00  пауза вышла, но тишина отсчитывается ЗАНОВО от собственной
+#           реплики: 4 ч -> ниже SILENCE_START_HOURS (6 ч), повода нет.
+#           Молчит — и это главное, что держит сценарий.
+#
+# Третий заход и есть проверка на навязчивость. Без него правка «мерить
+# тишину от последнего сказанного ЗДЕСЬ» осталась бы непокрытой, а без самой
+# правки персонаж говорил бы в молчащий чат каждые два часа до исчерпания
+# бюджета суток — проверено внесением до того, как правка была сделана.
+INIT_NOW = NOW + timedelta(hours=30)
+INIT_SOON = INIT_NOW + timedelta(minutes=10)
+INIT_LATER = INIT_NOW + timedelta(hours=4)
+
+# Ровно один ответ на весь сценарий: заговорить персонаж обязан ОДИН раз.
+# Скрипт из одного элемента и есть эта проверка — заговори он на втором или
+# третьем заходе, `_StubLLM` упадёт с именем лишнего промпта.
+_INITIATIVE_SCRIPT = [
+    ("инициатива", "Дождь всё-таки пошёл. Ты, кажется, зонт не брал."),
+]
+
+
+def _render_urges(urges) -> str:
+    if not urges:
+        return "  (ничего)"
+    return "\n".join(
+        f"  {u.kind:<12} | {(u.subject or '—'):<8} | {u.amount:>5.2f} | {u.mode}"
+        for u in urges
+    )
+
+
+def _dump_impulses(eng) -> str:
+    rows = eng.open_impulses()
+    if not rows:
+        return "импульсы (несказанные): нет"
+    out = ["импульсы (несказанные):",
+           f"  {'род':<12} | {'предмет':<8} | {'сила':>5} | протухает"]
+    for r in rows:
+        out.append(
+            f"  {r['kind']:<12} | {(r['subject'] or '—'):<8} | {r['urge']:>5.2f} | "
+            f"{r['expires_at'] or '—'}"
+        )
+    return "\n".join(out)
+
+
+def _run_initiative() -> str:
+    """Персонаж заговаривает сам: три захода, из них говорящий один.
+
+    Артефактов пять, и каждый закрывает свой стык:
+
+    - **что почувствовал** — список побуждений с силой и породой (`set` или
+      `bump`). Считается без базы и без модели, поэтому проверяется прямо;
+    - **три захода подряд** — сказал, промолчал по паузе, промолчал по
+      отсутствию повода. Одним заходом заслонки неразличимы;
+    - **что уехало в модель** — системный промпт персонажа, рабочая память и
+      ремарка последней репликой. Ремарка обязана быть видна целиком: это
+      единственное место, где сказано, ПОЧЕМУ он заговорил;
+    - **разговор после** — нечётное число строк, последняя `assistant` без
+      пары. Ровно то, на чём ломалось прежнее чтение;
+    - **промпт выжимки** — транскрипт лентой. Съедь он на паре, слова
+      человека уехали бы персонажу, и видно это только здесь.
+    """
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_INITIATIVE_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
+
+    sensed = cycle.sense_impulses(eng, INIT_NOW, _WEATHER_RAIN)
+
+    said = cycle.background_tick(
+        eng, edges, INIT_NOW, tz=TZ,
+        announce=lambda text: journal.append(
+            _journal_line("СКАЗАЛ", "человеку", text)),
+    )
+    after_first = _dump_impulses(eng)
+
+    soon = cycle.background_tick(eng, edges, INIT_SOON, tz=TZ)
+    later = cycle.background_tick(eng, edges, INIT_LATER, tz=TZ)
+
+    messages = llm.seen[0] if llm.seen else []
+    layers = "\n".join(
+        f"[{i}] {m['role']}\n{m['content']}" for i, m in enumerate(messages, 1)
+    )
+
+    return (
+        f"ПОЧУВСТВОВАЛ на {iso(INIT_NOW)}:\n{_render_urges(sensed)}\n"
+        f"{'=' * 60}\n"
+        f"заход 1 (+30ч, тихо 30.2ч):  сказал = {said is not None}\n"
+        f"заход 2 (+10 мин):           сказал = {soon is not None}   "
+        f"(пауза {cycle.UTTERANCE_COOLDOWN_HOURS} ч)\n"
+        f"заход 3 (+4ч от первого):    сказал = {later is not None}   "
+        f"(тихо 4 ч — меньше {cycle.SILENCE_START_HOURS} ч)\n"
+        f"{'=' * 60}\n"
+        f"{after_first}\n"
+        f"{'=' * 60}\n"
+        f"вызовы модели по порядку:\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+        + f"\n{'=' * 60}\n"
+        f"уехало в модель ({len(messages)} сообщений):\n{layers}\n"
+        f"{'=' * 60}\n"
+        f"разговор после (рабочая память):\n"
+        f"{json.dumps(eng.working_memory(), ensure_ascii=False, indent=2)}\n"
+        f"{'=' * 60}\n"
+        f"{_build_summarizer_prompt(eng.snapshot(INIT_LATER), eng.summary_buffer())}"
+    )
+
+
 def _seed_queue(eng) -> tuple[int, int, int]:
     """Догнать очередь до трёх терминальных состояний. Возвращает их id.
 
@@ -1537,6 +1658,8 @@ def render(name: str) -> str:
     if name not in SCENARIOS:
         raise KeyError(name)
 
+    if name == "initiative":
+        return _run_initiative()
     if name == "http":
         return _run_http()
     if name == "inspector":

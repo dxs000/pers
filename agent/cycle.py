@@ -3,7 +3,7 @@
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import config
@@ -11,7 +11,7 @@ import outside
 import sky as sky_mod
 import web
 from mind import (build_system_prompt, decide_query, extract_objects,
-                  reflect_mood, reflect_self, weather_family)
+                  reflect_mood, reflect_self, speak_first, weather_family)
 from snapshot import SESSION_GAP_HOURS
 from openai import OpenAI, OpenAIError
 
@@ -250,3 +250,177 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
     except Exception as err:
         logging.warning("digest_one: %s — повторю на следующем круге", err)
         return False
+
+# =============================================================================
+# Фоновый ход (Шаг 35): персонаж заговаривает сам
+# =============================================================================
+# Пороги инициативы. Живут ЗДЕСЬ, а не в хранилище: база копит побуждение,
+# решает цикл. Затухание, наоборот, в `store_pg` — оно считается внутри SQL.
+#
+# Числа выбраны на глаз и правятся на живом, как `RETRIEVER_COOLDOWN_HOURS`.
+# Смысл у них разный, и потому их три, а не одно:
+IMPULSE_FLOOR = 1.0          # ниже — повод есть, но говорить не о чем
+UTTERANCE_COOLDOWN_HOURS = 2.0   # не чаще, чем раз в столько, что бы ни копилось
+UTTERANCES_PER_DAY = 6       # потолок суток; молчаливость дешевле навязчивости
+IMPULSE_DAMP = 0.3           # во сколько глушатся прочие поводы после реплики
+
+# Побуждение от тишины. Не «сколько часов молчим», а сколько это в сутках:
+# так порог не придётся пересчитывать, если сутки перестанут быть мерой.
+SILENCE_URGE_PER_DAY = 1.4
+SILENCE_START_HOURS = 6.0    # раньше — не молчание, а пауза в разговоре
+
+# Побуждение от перемены за окном. Разовое и крупное: смена семейства —
+# новость, и если о ней не сказать сейчас, говорить будет не о чем.
+WEATHER_URGE = 1.2
+WEATHER_TTL_HOURS = 4.0      # дождь, о котором вспомнили к ночи, — не новость
+
+
+@dataclass(frozen=True)
+class Urge:
+    """Побуждение, замеченное на одном заходе.
+
+    **Поле `mode` — несущее, и оно отвечает на ошибку первого наброска.**
+    Поводы бывают двух пород, и складывать их одинаково нельзя:
+
+      `bump` — СОБЫТИЕ. Началось, кончилось, приснилось. Оно случилось один
+        раз, его сила прибавляется к накопленной и со временем тает.
+        Пропусти его — и оно потеряно, потому что второй раз не случится.
+
+      `set`  — СОСТОЯНИЕ. Не «намолчали ещё немного», а «молчим уже столько».
+        Сила не копится, а ВЫЧИСЛЯЕТСЯ по настоящему, и записывается поверх.
+
+    Первый набросок складывал и то и другое, отчего сила тишины зависела от
+    того, как часто демон просыпается: подливай раз в пять секунд — растёт
+    быстро, раз в минуту — медленно, а молчание при этом одно и то же.
+    Частота опроса — свойство демона, персонаж о ней знать не должен.
+    """
+
+    kind: str
+    subject: str | None
+    amount: float
+    mode: str = "bump"
+    expires_at: datetime | None = None
+
+
+def sense_impulses(eng, now: datetime, wx) -> list[Urge]:
+    """Что сейчас побуждает заговорить. Чувствует, но НЕ пишет.
+
+    Разделено сознательно: список поводов — ровно то, что сбруя обязана
+    уметь проверить без базы и без модели. Смешай сюда запись, и проверять
+    пришлось бы через хранилище, то есть через два слоя вместо нуля.
+
+    Сети здесь нет: `wx` приезжает готовым от вызывающего, как и в
+    `prompt_and_latch`. Нечистое живёт на краю.
+    """
+    out: list[Urge] = []
+
+    # Молчание меряется от последнего сказанного ЗДЕСЬ — чужого или своего.
+    #
+    # Первый набросок смотрел только на `last_exchange`, то есть на разговор,
+    # и это давало навязчивость с гарантией. Персонаж говорил в пустоту, ему
+    # не отвечали, `last_exchange` не двигался — и на следующем заходе сила
+    # тишины пересчитывалась ещё БОЛЬШЕЙ, чем была. Проверено внесением:
+    # после реплики в молчащий чат через три часа побуждение выросло с 1.76
+    # до 1.94. Дальше он говорил каждые два часа, пока не упирался в бюджет
+    # суток, и так каждый день.
+    #
+    # Собственная реплика тишину не отменяет — разговора не случилось, — но
+    # ПОВОД её нарушить она исчерпывает: сказать снова то же самое в ту же
+    # пустоту нечего. Отсюда `max`: побуждение отсчитывается заново, и до
+    # порога оно доползает примерно через сутки, а не через два часа.
+    #
+    # `agent.last_exchange_ts` при этом по-прежнему не трогается
+    # (`append_utterance`), и это не противоречие, а разделение: метка
+    # отвечает на «когда мы разговаривали» и уезжает в промпт словами
+    # «прошлый разговор был давно» — там собственная реплика была бы ложью.
+    last = eng.last_exchange()
+    said = eng.last_utterance()
+    since = max([t for t in (last, said) if t is not None], default=None)
+    if since is not None:
+        hours = (now - since).total_seconds() / 3600.0
+        if hours >= SILENCE_START_HOURS:
+            # Состояние: сила — функция того, сколько тихо прямо сейчас.
+            out.append(Urge("silence", None,
+                            SILENCE_URGE_PER_DAY * hours / 24.0, mode="set"))
+
+    family = weather_family(wx)
+    if family:
+        latch = (eng.snapshot(now).outside_latch or {})
+        if latch.get("weather") and latch["weather"] != family:
+            # Событие: перемена случилась один раз и протухнет.
+            out.append(Urge("weather", family, WEATHER_URGE, mode="bump",
+                            expires_at=now + timedelta(hours=WEATHER_TTL_HOURS)))
+
+    return out
+
+
+def background_tick(eng, edges: Edges, now: datetime, *,
+                    announce: Callable[[str], None] | None = None,
+                    tz=None) -> str | None:
+    """Один фоновый заход: накопить поводы и, может быть, заговорить.
+
+    Возвращает сказанное или `None`. `None` — обычный исход: молчание здесь
+    не отказ, а норма, и подавляющее большинство заходов кончаются им.
+
+    **Порядок: сперва замечаем, потом решаем.** Обратный порядок («есть ли
+    повод -> если да, посчитать») дешевле на тик, но даёт персонажа, который
+    не замечает того, о чём не собирался говорить: повод, не дотянувший до
+    порога, исчезал бы вместо того, чтобы накопиться.
+
+    **Заслонок три, и каждая отвечает своему провалу.** Порог отсекает «повод
+    есть, но говорить не о чем»; пауза — «повод сильный, но мы только что
+    разговаривали»; бюджет суток — «поводов много, и каждый по-своему прав».
+    Одной величиной их не выразить: убери бюджет, и день с меняющейся погодой
+    сделает персонажа невыносимым, хотя каждая отдельная реплика будет
+    уместной.
+    """
+    tz = tz or config.TZ
+    place = eng.place()
+    snap = sky_mod.local_snapshot(place.get("lat"), place.get("lon"), now, tz)
+    wx = weather_snapshot(place, edges, now)
+
+    urges = sense_impulses(eng, now, wx)
+    if urges:
+        with eng.unit():
+            for u in urges:
+                eng.record_urge(u.kind, u.subject, u.amount, now,
+                                mode=u.mode, expires_at=u.expires_at)
+
+    # Пауза и бюджет спрашиваются ДО выбора повода: ни та ни другой не
+    # зависят от того, какой повод победит, и спросить их первыми дешевле
+    # ровно на один запрос к самой длинной таблице.
+    said_last = eng.last_utterance()
+    if said_last is not None:
+        idle = (now - said_last).total_seconds() / 3600.0
+        if 0.0 <= idle < UTTERANCE_COOLDOWN_HOURS:
+            return None
+    if eng.utterances_since(now - timedelta(days=1)) >= UTTERANCES_PER_DAY:
+        logging.info("инициатива: бюджет суток исчерпан (%s)", UTTERANCES_PER_DAY)
+        return None
+
+    impulse = eng.strongest_impulse(now, IMPULSE_FLOOR)
+    if not impulse:
+        return None
+
+    text = speak_first(
+        eng.snapshot(now), impulse, edges.llm,
+        memory=eng.working_memory(),
+        now=now.astimezone(tz), sky=snap, weather=wx,
+        last_exchange=eng.last_exchange(),
+    )
+    if not text:
+        # Повод НЕ гасится: модель промолчала, а побуждение никуда не делось.
+        # Пометь его сказанным — и персонаж потерял бы то, о чём хотел
+        # сказать, из-за одной неудачной попытки.
+        return None
+
+    with eng.unit():
+        eng.append_utterance(text, now)
+        eng.mark_spoken(impulse["id"], now, IMPULSE_DAMP)
+        eng.remember_outside(snap, wx, now, weather_family(wx))
+
+    logging.info("заговорил сам (%s, urge %.2f): %s",
+                 impulse["kind"], impulse["urge"], text[:60])
+    if announce is not None:
+        announce(text)
+    return text

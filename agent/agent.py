@@ -73,8 +73,8 @@ def resolve_place(eng, edges: cycle.Edges, now: datetime) -> bool:
 def finish_session(eng, now: datetime, client) -> dict | None:
     buf = eng.summary_buffer()
     summary = None
-    if buf.get("exchanges"):
-        logging.info("записываю разговор: %s обменов", len(buf["exchanges"]))
+    if buf.get("messages"):
+        logging.info("записываю разговор: %s реплик", len(buf["messages"]))
         try:
             summary = summarize_session(eng.snapshot(now), buf, client)
         except Exception as err:
@@ -113,6 +113,32 @@ def drain(eng, edges: cycle.Edges) -> None:
             return
 
 
+def idle_tick(eng, edges: cycle.Edges) -> None:
+    """Фоновая работа: делается только когда очередь пуста (Шаг 35).
+
+    **Реактивная ветка вытесняет фоновую, и это правило, а не оптимизация.**
+    Человек, написавший реплику, ждёт ответа; персонаж, собравшийся заговорить
+    сам, не ждёт ничего. Поставь фоновый заход впереди `drain` — и на каждую
+    реплику накладывалась бы задержка вызова модели, которого никто не просил.
+
+    Очередь перепроверяется ПОСЛЕ захода: заход ходит в сеть за погодой и в
+    модель за репликой, и за это время реплика могла прийти. Возвращаемся в
+    `serve`, который тут же позовёт `drain`.
+
+    Исключение не выпускается наружу: фон — не то, из-за чего демон обязан
+    падать. Реактивная половина от этого не зависит и должна пережить
+    сломанный фон.
+    """
+    try:
+        cycle.background_tick(
+            eng, edges, datetime.now(timezone.utc),
+            announce=lambda _text: store_pg.notify(
+                eng.conn, store_pg.CHANNEL_REPLY),
+        )
+    except Exception as err:
+        logging.warning("фоновый заход не удался: %s", err)
+
+
 def serve(eng, edges: cycle.Edges) -> None:
     store_pg.listen(eng.conn, store_pg.CHANNEL_INBOX)
     logging.info("слушаю канал %s, пробуждение не реже %.0f с",
@@ -124,6 +150,9 @@ def serve(eng, edges: cycle.Edges) -> None:
         if _STOP:
             break
         drain(eng, edges)
+        if _STOP:
+            break
+        idle_tick(eng, edges)
 
 
 def main() -> int:
