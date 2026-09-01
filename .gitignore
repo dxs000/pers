@@ -12,3 +12,4 @@ agent/.python-version
 agent/__pycache__/
 
 
+agent/fixture_state.json

@@ -79,7 +79,7 @@ pg-прогоне брался из файла, единственное мес�
 import argparse
 import difflib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import sys
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -88,6 +88,10 @@ from types import SimpleNamespace
 import build_fixture
 import cycle
 import sky
+# `iso`, а не `datetime.isoformat`: метка уезжает в эталон, а один и тот же
+# момент пишется как `+00:00` и как `+04:00` — строки разные. Приводит к UTC
+# то же место, что и для снимка (см. `snapshot.iso`).
+from snapshot import iso
 from mind import (
     _build_extractor_prompt,
     _build_reflector_prompt,
@@ -411,6 +415,15 @@ class _StubLLM:
         self.seen: list[list[dict]] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
+    def retarget(self, journal) -> None:
+        """Писать дальше в другой журнал. Скрипт продолжается с того же места.
+
+        Нужно из-за расщепления хода на T1 и T2 (Шаг 27): единицы разные, и
+        в артефакте они обязаны быть разными списками, — но модель между
+        ними одна, и счёт её вызовов сквозной.
+        """
+        self._journal = journal
+
     def _create(self, *, model=None, messages=None, **kwargs):
         if not self._script:
             raise AssertionError(
@@ -475,30 +488,45 @@ _TAVILY_PAYLOAD = {
 # внесённая поломка (`previous` наверх, как было до Шага 27) оставляла
 # сценарий зелёным. Со вторым ходом обе величины становятся видимыми:
 #
-#   - `since_search` въезжает 3, выезжает 0, на втором ходу въезжает 0 —
-#     и заслонка глушит поиск, хотя ретривер по-прежнему СПРАШИВАЕТСЯ
-#     (вердикт логируется всегда, это решение Шага 13);
+#   - заслонка ретривера: на первом ходу `last_search_ts` пуст и поиск
+#     проходит, на втором метка уже стоит и поиск глушится — при том что
+#     ретривер по-прежнему СПРАШИВАЕТСЯ (вердикт логируется всегда, это
+#     решение Шага 13);
 #   - `previous` на втором ходу указывает на первый, а не на фикстур.
 #
-# Второй ход отстоит на два часа — намеренно в окне между
-# `SILENCE_MIN_HOURS` (1 ч) и `SESSION_GAP_HOURS` (3 ч). Это то самое
-# окно, которое роадмап велел открыть НАМЕРЕННО: молчание внутри живой
-# сессии теперь рендерится, и эталон показывает, как именно.
-# Первый ход отстоит от последнего обмена ФИКСТУРА на двадцать часов, а
-# второй от первого — на два. Числа выбраны не для правдоподобия, а чтобы
-# два прочтения `previous` попадали в РАЗНЫЕ корзины `AGE_BUCKETS`:
+# **Интервал между ходами переехал с двух часов на тридцать минут, и это
+# правка Шага 33.** Он всегда отвечал сразу двум порогам; правка «поиск по
+# времени» добавила третий, и три развести стало нечем.
+#
+# Было так: два часа — окно между `SILENCE_MIN_HOURS` (1 ч) и
+# `SESSION_GAP_HOURS` (3 ч), то самое, которое Шаг 27 открыл сознательно.
+# Молчание внутри живой сессии рендерилось, и заодно два прочтения
+# `previous` попадали в РАЗНЫЕ корзины `AGE_BUCKETS`:
 #
 #   каждый ход (сегодня)      ход 2 смотрит на ход 1  -> 2 ч  -> «недавно»
 #   однажды до цикла (было)   ход 2 смотрит на фикстур -> 22 ч -> «на днях»
 #
-# Без этого расхождение неотличимо: между 1 и 18 часами лежит одна корзина,
-# и поломка, возвращающая `previous` наверх, оставляла сценарий зелёным —
-# проверено внесением. Два часа сохранены намеренно: это окно между
-# `SILENCE_MIN_HOURS` (1 ч) и `SESSION_GAP_HOURS` (3 ч), то самое, которое
-# Шаг 27 открыл сознательно — молчание ВНУТРИ живой сессии теперь
-# рендерится, и эталон показывает, как именно.
+# Стало так: заслонка перестала быть счётчиком-параметром и стала меткой
+# времени с порогом в час (`RETRIEVER_COOLDOWN_HOURS`). На двух часах она
+# успевает открыться обратно, и ветка подавления — ровно то, что правка
+# изменила, — осталась бы непроверенной. Пороги смотрят в разные стороны от
+# ОДНОГО часа: молчание требует не меньше, заслонка не больше. Удержать оба
+# одним интервалом нельзя, и выбран тот, который правка только что тронула.
+#
+# Поломка `previous` при этом остаётся видимой, только иначе — не сменой
+# корзины, а появлением строки, которой быть не должно:
+#
+#   каждый ход (сегодня)      ход 2 смотрит на ход 1  -> 0.5 ч -> строки НЕТ
+#   однажды до цикла (было)   ход 2 смотрит на фикстур -> 20.5 ч -> «на днях»
+#
+# Это даже резче: отсутствие целой строки заметнее диффом, чем замена
+# одного слова другим. Потеря — рендер молчания ВНУТРИ живой сессии, та
+# самая ветка Шага 27; её держит сценарий `silence` с разрывом в 300 часов,
+# то есть сама ветка покрыта, а вот её ближняя корзина — больше нет.
 TURN1_NOW = NOW + timedelta(hours=20)
-TURN2_NOW = TURN1_NOW + timedelta(hours=2)
+# Меньше `cycle.RETRIEVER_COOLDOWN_HOURS` — привязано к порогу, а не выбрано
+# за правдоподобие: поедет порог, поедет и это число.
+TURN2_NOW = TURN1_NOW + timedelta(minutes=30)
 _TURN2_USER = "А до бань этих далеко идти?"
 
 # Ответы в том порядке, в каком ход обязан спрашивать. Ретривер отвечает
@@ -575,6 +603,18 @@ INBOX_RACE_TS = NOW + timedelta(hours=23, minutes=40)
 INBOX_RACE_NOW = NOW + timedelta(hours=23, minutes=45)
 INBOX_RACE_TEXT = "А до бань этих далеко идти?"
 
+# Хвост скрипта (три служебных прохода) сегодня НЕ расходуется, и это
+# решение, а не остаток. Сценарий очереди смотрит на вход хода — разрез,
+# склейку, пометку, гонку, — а T2 с Шага 27 отложен в `followups` и здесь не
+# запускается: его держит `turn`, у которого T1 и T2 разведены двумя
+# списками. Дублировать переваривание тут значило бы завести второго
+# читателя одному правилу — то, чего проект избегает по всей длине.
+#
+# Скрипт всё равно полный, по тому же доводу, что у `_INBOX_RACE_SCRIPT`:
+# обрежь его до двух — и поломка, при которой T1 зовёт модель лишний раз,
+# краснела бы `AssertionError` от заглушки, то есть жалобой сбруи на саму
+# себя. С полным скриптом она краснеет ДИФФОМ, и видно, ЧТО именно ход
+# спросил сверх положенного.
 _INBOX_SCRIPT = [
     ("ретривер", "погода в Тбилиси сегодня"),
     ("ответчик", "Перебралась, да. И льёт, судя по всему."),
@@ -763,40 +803,114 @@ def _run_memory() -> str:
     )
 
 
-def _drive_turn(eng, net, script, text, now, since_search):
-    """Один ход под заглушками. Возвращает (итог, журнал, что уехало в модель)."""
+@dataclass(frozen=True)
+class _Driven:
+    """Что вернул прогон одного хода. Семь значений кортежем не читаются.
+
+    Полей семь, потому что ход с Шага 27 — это ДВЕ единицы, и артефакт
+    показывает обе: `journal` — вызовы T1, `digest` — вызовы T2,
+    `digested` — нашлась ли для T2 работа вообще.
+    """
+
+    outcome: object
+    journal: list[str]
+    messages: list[dict]
+    before: object
+    after: object
+    digest: list[str]
+    digested: bool
+
+
+def _drive_turn(eng, net, script, text, now):
+    """Один ход под заглушками.
+
+    Возвращает (итог, журнал, что уехало в модель, заслонка до, заслонка после).
+
+    **Заслонка ретривера читается из базы, а не подаётся параметром.** До
+    Шага 33 её возил счётчик `since_search`: сбруя передавала его в
+    `handle_turn`, а `Outcome` возвращал следующее значение. Правка «поиск
+    по времени» перенесла заслонку в `agent.last_search_ts` — её читает
+    `look_outward` через `eng.last_search_ts()` и пишет `eng.mark_search()`,
+    — и параметра не стало. Артефакт от этого не обеднел, а стал честнее:
+    счётчик был свойством вызова и жил ровно столько, сколько длился ход, а
+    метка — свойство персонажа и переживает перезапуск. Смотреть на неё надо
+    там, где она лежит.
+    """
     journal: list[str] = []
     llm = _StubLLM(script, journal)
     edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
 
+    before = eng.last_search_ts()
     outcome = cycle.handle_turn(
         eng, edges, text, now,
-        since_search=since_search,
         announce=lambda answer: journal.append(
             _journal_line("ОТВЕТ", "человеку", answer)
         ),
         tz=TZ,
     )
+    after = eng.last_search_ts()
+
+    # T2 ОТДЕЛЬНЫМ вызовом, и журнал у него свой. `handle_turn` больше не
+    # переваривает: он кладёт работу в `followups` и возвращается, а три
+    # служебных прохода делает `digest_one` — так демон и работает
+    # (`agent.drain` зовёт его, когда очередь пуста). Пока T2 шёл внутри
+    # хода, сбруя видела шесть вызовов подряд и не могла отличить «ответ
+    # отдан до переваривания» от «отдан после»; теперь разделение
+    # структурное, и артефакт показывает его двумя списками, а не порядком
+    # строк в одном. Ровно то же решение, что у `announce`: границу видно
+    # там, где она есть.
+    # Заглушка ОДНА на обе единицы, меняется только журнал, в который она
+    # пишет. Второй `_StubLLM` со срезом скрипта развязал бы их и потерял
+    # главное свойство первой: «позвана больше раз, чем в сценарии — падение».
+    # С одной заглушкой лишний вызов в T1 съедает ответ, предназначенный T2,
+    # и краснеет там, где случился, а не там, где кончился срез.
+    digest: list[str] = []
+    llm.retarget(digest)
+    digested = cycle.digest_one(eng, edges, now)
 
     messages = next((m for m in llm.seen if m and m[0]["role"] == "system"), None)
     if messages is None:
         raise AssertionError("сбруя: ход не показал модели ни одного системного промпта")
-    return outcome, journal, messages
+    return _Driven(outcome, journal, messages, before, after, digest, digested)
 
 
-def _render_turn(title: str, since_in: int, outcome, journal, messages) -> str:
+def _search_ts(value) -> str:
+    """`last_search_ts` для артефакта. Нет метки — прочерк, а не `None`.
+
+    Прочерк, потому что «персонаж ещё не искал ни разу» — законное
+    состояние чистого старта, а не пропущенное значение, и выглядеть оно
+    должно как состояние.
+    """
+    return "—" if value is None else iso(value)
+
+
+def _numbered(lines) -> str:
+    return "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
+
+
+def _render_turn(title: str, d: _Driven) -> str:
     layers = "\n".join(
-        f"[{i}] {m['role']}\n{m['content']}" for i, m in enumerate(messages, 1)
+        f"[{i}] {m['role']}\n{m['content']}" for i, m in enumerate(d.messages, 1)
     )
-    calls = "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+    # Переход метки И есть видимая заслонка: сдвинулась — поиск состоялся,
+    # осталась прежней — подавлен. Печатается переход, а не факт поиска,
+    # потому что факт выводится из перехода, а обратное неверно.
+    moved = "сдвинулась" if d.before != d.after else "не двигалась"
+    # Списка два, и это структура артефакта, а не оформление. Одним списком
+    # «ответ отдан ДО переваривания» доказывалось бы порядком строк, то есть
+    # соглашением; двумя — доказывается тем, что T1 закончился.
     return (
-        f"{title}: ответ есть = {outcome.answer is not None}, "
-        f"ошибка = {outcome.error}, "
-        f"since_search: {since_in} -> {outcome.since_search}\n"
+        f"{title}: ответ есть = {d.outcome.answer is not None}, "
+        f"ошибка = {d.outcome.error}, "
+        f"last_search_ts: {_search_ts(d.before)} -> {_search_ts(d.after)} "
+        f"({moved})\n"
         f"{'=' * 60}\n"
-        f"уехало в модель ({len(messages)} сообщений):\n{layers}\n"
+        f"уехало в модель ({len(d.messages)} сообщений):\n{layers}\n"
         f"{'=' * 60}\n"
-        f"вызовы модели по порядку:\n{calls}"
+        f"T1 — вызовы по порядку (ответ отдан здесь):\n{_numbered(d.journal)}\n"
+        f"{'-' * 60}\n"
+        f"T2 — отложенное переваривание, работа нашлась = {d.digested}:\n"
+        f"{_numbered(d.digest)}"
     )
 
 
@@ -819,22 +933,38 @@ def _run_turn() -> str:
     - **рабочая память после хода** — доказательство T1: две строки,
       реплика и ответ, в правильном порядке и с правильными ролями.
 
-    Первый ход подаётся с открытой заслонкой (`RETRIEVER_COOLDOWN`), иначе
-    поиска не случилось бы и половина сценария осталась бы непройденной;
-    второй получает то, что вернул первый, — и заслонка закрыта.
+    Первый ход застаёт заслонку ОТКРЫТОЙ: фикстур приезжает без
+    `last_search_ts` (персонаж ещё не искал), и `look_outward` пропускает
+    запрос. Второй ход отстоит меньше чем на `RETRIEVER_COOLDOWN_HOURS`,
+    поэтому заслонка закрыта, и находок нет ни в системном промпте, ни у
+    экстрактора — при том что ретривер всё равно спрошен.
+
+    **Интервал между ходами задан заслонкой, и это правка Шага 33.** Пока
+    заслонка была счётчиком-параметром, интервал ни на что не влиял и стоял
+    в два часа; с переездом в `agent.last_search_ts` она стала временной, и
+    два часа при пороге в час означали бы, что заслонка успела открыться
+    обратно. Ветка подавления — ровно то, что правка «поиск по времени»
+    изменила, и остаться непроверенной она не может.
+
+    Цена названа: на получасовом интервале молчание короче
+    `SILENCE_MIN_HOURS`, и строки «Прошлый разговор был…» во втором промпте
+    больше нет. Потеря невелика — ветку молчания держит свой сценарий
+    (`silence`), у которого разрыв в 300 часов, — но она есть, и удержать
+    обе одним прогоном нельзя: пороги смотрят в разные стороны от одного
+    часа. Обратная ветка (заслонка открылась снова, поиск повторился) сегодня
+    не покрыта; ей нужен третий ход, и это отдельное решение со своей ценой
+    в четыреста строк эталона.
     """
     eng = open_engine()
     net = _FakeNet()
 
-    since = cycle.RETRIEVER_COOLDOWN
-    first = _drive_turn(eng, net, _TURN_SCRIPT_1, _TURN_USER, TURN1_NOW, since)
-    second = _drive_turn(eng, net, _TURN_SCRIPT_2, _TURN2_USER, TURN2_NOW,
-                         first[0].since_search)
+    first = _drive_turn(eng, net, _TURN_SCRIPT_1, _TURN_USER, TURN1_NOW)
+    second = _drive_turn(eng, net, _TURN_SCRIPT_2, _TURN2_USER, TURN2_NOW)
 
     return (
-        f"{_render_turn('ход 1', since, *first)}\n"
+        f"{_render_turn('ход 1', first)}\n"
         f"{'=' * 60}\n"
-        f"{_render_turn('ход 2 (+2ч)', first[0].since_search, *second)}\n"
+        f"{_render_turn('ход 2 (+30 мин)', second)}\n"
         f"{'=' * 60}\n"
         f"рабочая память после двух ходов:\n"
         f"{json.dumps(eng.working_memory(), ensure_ascii=False, indent=2)}\n"
@@ -950,7 +1080,6 @@ def _run_inbox() -> str:
     outcome = cycle.handle_pending(
         eng, cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка"),
         INBOX_NOW,
-        since_search=cycle.RETRIEVER_COOLDOWN,
         announce=lambda answer: journal.append(
             _journal_line("ОТВЕТ", "человеку", answer)),
         close_session=_close,
@@ -965,7 +1094,7 @@ def _run_inbox() -> str:
         f"{'=' * 60}\n"
         f"итог: ответ есть = {outcome.answer is not None}, "
         f"ошибка = {outcome.error}, перехвачен = {outcome.superseded}, "
-        f"since_search -> {outcome.since_search}\n"
+        f"last_search_ts -> {_search_ts(eng.last_search_ts())}\n"
         f"{'=' * 60}\n"
         f"вызовы по порядку:\n"
         + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
@@ -992,14 +1121,14 @@ def _run_inbox() -> str:
         eng, cycle.Edges(llm=_StubLLM(_INBOX_WINNER_SCRIPT, race_journal),
                          http=net, search=net, search_key="ключ-заглушка"),
         INBOX_RACE_TEXT, INBOX_RACE_NOW,
-        since_search=0, arrived_at=INBOX_RACE_TS,
+        arrived_at=INBOX_RACE_TS,
         inbox_ids=[r["id"] for r in shared], tz=TZ,
     )
     loser = cycle.handle_turn(
         eng, cycle.Edges(llm=_StubLLM(_INBOX_RACE_SCRIPT, race_journal),
                          http=net, search=net, search_key="ключ-заглушка"),
         INBOX_RACE_TEXT, INBOX_RACE_NOW + timedelta(seconds=1),
-        since_search=0, arrived_at=INBOX_RACE_TS,
+        arrived_at=INBOX_RACE_TS,
         inbox_ids=[r["id"] for r in shared], tz=TZ,
     )
 
