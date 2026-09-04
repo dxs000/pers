@@ -2,16 +2,18 @@
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import config
+import genesis
 import outside
 import sky as sky_mod
 import web
 from mind import (build_system_prompt, decide_query, extract_objects,
-                  reflect_mood, reflect_self, speak_first, weather_family)
+                  propose_birthplaces, propose_names, reflect_mood,
+                  reflect_self, speak_first, weather_family)
 from snapshot import SESSION_GAP_HOURS
 from openai import OpenAI, OpenAIError
 
@@ -424,3 +426,148 @@ def background_tick(eng, edges: Edges, now: datetime, *,
     if announce is not None:
         announce(text)
     return text
+
+
+# =============================================================================
+# Генезис (Шаг 36.3): рождение как ПЛАН, отдельно от записи
+# =============================================================================
+# Порядок здесь жёсткий и однонаправленный: тяга -> место -> имя.
+#
+# Место раньше имени, потому что мода имён когортная И местная: один и тот
+# же город с разницей в двадцать лет даёт разные списки, а один и тот же год
+# в двухстах километрах — другие. Спроси имя раньше разрешённого места, и
+# получишь человека ниоткуда, то есть ровно ту усреднённость, от которой
+# тяга и уводит.
+#
+# Модель зовётся ДВАЖДЫ и оба раза служебно: она перечисляет населённые
+# пункты и имена — то, что знает как справочник. Ничего о характере, судьбе
+# и занятиях у неё не спрашивается ни здесь, ни вообще: это обязано нарасти
+# воспоминаниями, а не выпасть анкетой на первом вызове.
+
+# Проверяется РАССТОЯНИЕ ОТ ДОМА, и только оно.
+#
+# До первого живого прогона сверялось удаление от целевой точки — то есть
+# заодно и направление. Прогон показал, почему так нельзя: модель
+# направление игнорирует. Просили 733 км к югу от Брянска — получили восемь
+# посёлков Карачаево-Черкесии, это юго-восток и 1170 км. Фильтр по цели
+# отсекал ВСЁ и сваливал генезис в `same_place` на каждом прогоне, а
+# проверка, не пропускающая ничего, — не проверка, а выключатель.
+#
+# Расстояние модель при этом берёт: промах в 1.6 раза на плече в семьсот
+# километров. Полоса поэтому задана в РАЗАХ, а не в километрах — ошибка у
+# неё пропорциональная, а не абсолютная.
+#
+# Нижняя граница нужна не меньше верхней: без неё уцелел бы пригород, и
+# «родился в другом месте» выродилось бы в «родился в соседнем районе».
+#
+# Направление остаётся в промпте подсказкой. Цена названа: место рождения
+# ложится туда, куда модель охотнее вспоминает, и её предпочтения частично
+# возвращаются. Разнообразие держат требование разброса в промпте и тяга
+# среди уцелевших, а не проверка.
+BIRTHPLACE_NEAR = 0.5
+BIRTHPLACE_FAR = 2.5
+
+
+@dataclass(frozen=True)
+class Plan:
+    """Что БЫЛО БЫ записано. Сам не пишет и записи не касается.
+
+    План отделён от записи не ради сухого прогона — наоборот, сухой прогон
+    возможен потому, что план отделён. Рождение необратимо, и посмотреть на
+    него до записи надо иметь возможность без правки кода.
+
+    Три последних поля к записи отношения не имеют: это то, что предлагали,
+    что уцелело и по какой полосе. Они существуют для сухого прогона, и без
+    них он показывал бы результат, не показывая, из чего тот получился, —
+    то есть не давал бы поправить промпт, а только принять или отвергнуть
+    человека.
+    """
+
+    birth: object                      # genesis.Birth
+    birthplace: str | None
+    birthplace_lat: float | None
+    birthplace_lon: float | None
+    name: str | None
+    reason: str | None
+    proposed: list[str] = field(default_factory=list)
+    survived: list[tuple] = field(default_factory=list)
+    band_km: tuple = (0.0, 0.0)
+    names: list[dict] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """Есть ли что записывать. Без имени рождения не состоялось."""
+        return bool(self.name)
+
+
+def plan_genesis(place: dict, first_text: str, edges: Edges,
+                 now: datetime) -> Plan:
+    """Вытянуть рождение и достроить его моделью. НЕ ПИШЕТ НИЧЕГО.
+
+    Сеть здесь есть, и это не нарушение правила «нечистое живёт на краю»:
+    функция сама является краем — она зовётся один раз за жизнь персонажа и
+    снаружи хода. Чистая половина вынесена в `genesis` и проверяется эталоном
+    без сети и без модели.
+    """
+    birth = genesis.draw(place.get("label"), place.get("lat"),
+                         place.get("lon"), first_text, now)
+    digest = genesis.seed(place.get("label"), first_text, now)
+
+    # Считается ДО цикла: полоса — свойство тяги, а не кандидата, и внутри
+    # цикла пересчитывалась бы восемь раз, создавая впечатление, будто
+    # зависит от того, что назвала модель.
+    near = birth.distance_km * BIRTHPLACE_NEAR
+    far = birth.distance_km * BIRTHPLACE_FAR
+
+    proposed: list[str] = []
+    survived: list[tuple] = []
+    birthplace = place.get("label")
+    bp_lat, bp_lon = place.get("lat"), place.get("lon")
+
+    # Без координат дома сверять нечем: полоса меряется от него. Место
+    # рождения тогда совпадает с местом жизни — та же деградация, что у
+    # `sky` и `web`, а не отказ.
+    can_check = place.get("lat") is not None and place.get("lon") is not None
+
+    if not birth.same_place and can_check:
+        proposed = propose_birthplaces(place.get("label") or "", birth, edges.llm)
+        for label in proposed:
+            try:
+                found = outside.geocode(label, edges.http)
+            except Exception as err:
+                logging.warning("genesis: геокодер молчит на %r: %s", label, err)
+                continue
+            if not found:
+                continue
+            off = genesis.distance_km(place["lat"], place["lon"],
+                                      found["lat"], found["lon"])
+            if near <= off <= far:
+                survived.append((found["label"], round(off, 1),
+                                 found["lat"], found["lon"]))
+
+        picked = genesis.choose(digest, 3, survived)
+        if picked:
+            birthplace, _, bp_lat, bp_lon = picked
+        else:
+            # Ни одно не уцелело: сеть молчит, модель насочиняла или назвала
+            # не ту сторону света. Родился там же, где живёт, — законный
+            # исход, а не отказ, и второго вызова модели он не стоит:
+            # переспрашивание тянуло бы к тому же ответу, промпт тот же.
+            logging.info("genesis: место не подтвердилось "
+                         "(полоса %.0f–%.0f км) — родился там же", near, far)
+
+    names = propose_names(birth, birthplace or "", edges.llm)
+    chosen = genesis.choose(digest, 4, names)
+
+    return Plan(
+        birth=birth,
+        birthplace=birthplace,
+        birthplace_lat=bp_lat,
+        birthplace_lon=bp_lon,
+        name=chosen["name"] if chosen else None,
+        reason=chosen["reason"] if chosen else None,
+        proposed=proposed,
+        survived=survived,
+        band_km=(round(near, 1), round(far, 1)),
+        names=names,
+    )

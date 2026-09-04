@@ -237,7 +237,7 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
     by_object = _assertions_by_object(conn, [r["id"] for r in top] + [SELF_ID])
 
     return Turn(
-        name=agent.get("name", "Некто"),
+        name=agent.get("name"),
         born_at=iso(agent.get("born_at")),
         birthplace=agent.get("birthplace"),
         traits=tuple(agent.get("traits") or ()),
@@ -348,7 +348,7 @@ def _fill_fixture(conn, state: dict) -> None:
          WHERE id = 1
         """,
         (
-            self.get("name", "Некто"),
+            self.get("name"),
             self.get("born_at"),
             self.get("birthplace"),
             list(self.get("traits", [])),

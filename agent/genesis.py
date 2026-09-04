@@ -51,8 +51,8 @@ from timeutil import DAYS_IN_YEAR
 # Рамка («взрослый», «родом откуда-то отсюда») — это то, ВО ЧТО он рождается,
 # и её задаёт мир. Человек тоже рождается в ограничения, которых не выбирал;
 # `APP_PLACE` в конфиге — ровно такая же рамка, и никого это не смущает.
-AGE_BAND = (24, 52)          # полных лет на момент рождения персонажа
-BIRTH_RADIUS_KM = 900.0      # предельное удаление места рождения от места жизни
+AGE_BAND = (24, 75)          # полных лет на момент рождения персонажа
+BIRTH_RADIUS_KM = 2000.0      # предельное удаление места рождения от места жизни
 SAME_PLACE_KM = 25.0         # ближе — родился там же, где живёт
 
 # Пола здесь нет: он зашит мужским и живёт там, где читается, — в промптах
@@ -178,3 +178,21 @@ def draw(place_label: str | None, place_lat: float | None,
         lat, lon = round(lat, 4), round(lon, 4)
 
     return Birth(born, int(years), bearing, distance, lat, lon, same_place)
+
+def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Расстояние по большому кругу. Обратная к `_destination`."""
+    p1, p2 = radians(lat1), radians(lat2)
+    a = (sin((p2 - p1) / 2) ** 2
+         + cos(p1) * cos(p2) * sin(radians(lon2 - lon1) / 2) ** 2)
+    return 2.0 * EARTH_RADIUS_KM * asin(sqrt(a))
+
+
+def choose(digest: bytes, index: int, items: list):
+    """Вытянуть один из списка тем же дайджестом. Пусто -> None.
+
+    Именно вытянуть, а не взять лучший. Ранжируй кандидатов по близости к
+    цели — и вернулась бы детерминированная выборка, то есть ровно та мода,
+    от которой тяга и уводит: модель ставит самое известное первым, а «самое
+    близкое к точке» почти всегда оказывается самым крупным.
+    """
+    return items[int(_draw(digest, index) * len(items)) % len(items)] if items else None

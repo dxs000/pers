@@ -140,7 +140,6 @@ def build() -> dict:
         # source="self" на всех — это то, что пишет reflect_self.
         # Пятый (tic) — low, его обязан отсечь _TRUSTED_CONF.
         "assertions": [
-            _assertion("name", "Костя", "high", 3, 300, "self"),
             _assertion("occupation", "редактор", "high", 2, 250, "self"),
             _assertion("value", "точность", "med", 1, 120, "self"),
             _assertion("style", "отвечает вопросом на вопрос", "med", 2, 40, "self"),

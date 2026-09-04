@@ -108,6 +108,23 @@ WEATHER_APPARENT_GAP = 5.0   # ниже — «ощущается как» не �
 # прочитает.
 FIRST_MEMORY_AGE = 4
 
+NAME_CHAR_LIMIT = 40
+REASON_CHAR_LIMIT = 200
+
+BEARING_WORDS = (
+    "к северу", "к северо-востоку", "к востоку", "к юго-востоку",
+    "к югу", "к юго-западу", "к западу", "к северо-западу",
+)
+
+BIRTHPLACE_COUNT = 8
+
+NAMES_COUNT = 20
+GENESIS_GENDER = "мальчику"
+
+NAME_CHAR_LIMIT = 40
+REASON_CHAR_LIMIT = 200
+
+
 def build_system_prompt(
     turn: Turn,
     now=None,
@@ -131,21 +148,22 @@ def build_system_prompt(
     # Имя, возраст и происхождение — ОДНОЙ строкой, а не тремя.
     # Тремя они выглядели бы анкетой, а это первое, что модель читает о себе:
     # анкета в первой строке задаёт тон всему ответу.
-    who = f"Тебя зовут {name}"
-    if age is not None:
+    who = f"Тебя зовут {name}" if name else None
+    if who and age is not None:
         who += f", тебе {age} {_years_word(age)}"
-    if turn.birthplace:
+    if who and turn.birthplace:
         who += f", родом ты из {turn.birthplace}"
 
     parts = []
 
     traits_string = turn.traits_line
 
-    parts.append(
-        f"{who}. "
-        f"Твои черты характера: {traits_string}. "
-        f"Сейчас твое настроение - {mood}"
-    )
+    if who:
+        parts.append(f"{who}. Твои черты характера: {traits_string}. "
+                     f"Сейчас твое настроение - {mood}")
+    else:
+        parts.append(f"Твои черты характера: {traits_string}. "
+                     f"Сейчас твое настроение - {mood}")
 
     label = turn.place_label
     if label:
@@ -367,14 +385,16 @@ def _build_reflector_prompt(turn: Turn, user_text: str, answer: str) -> str:
 
         "Извлекай самонаблюдения как факты о себе - пары {key, value, confidence}:\n"
         " - биографическое, если персонаж сам это сказал о себе в реплике\n"
-        "   (имя, род занятий, происхождение, ценности): key вроде\n"
-        "   \"name\", \"occupation\", \"origin\", \"value\".\n"
+        "   (род занятий, происхождение, ценности): key вроде\n"
+        "   \"occupation\", \"origin\", \"value\".\n"
         " - поведенческое/стилевое, что проявилось в том, КАК он ответил\n"
         "   (тон, фиксация, приём): key вроде \"style\", \"focus\", \"tic\".\n"
         " - \"confidence\" - строго одно из: low, med, high.\n"
         "   high - персонаж явно и прямо сказал это о себе;\n"
         "   low - ты это домыслил по тону.\n"
-        " - не выдумывай того, чего в репликах нет. Нечего сказать - пустой массив.\n\n"
+        " - не выдумывай того, чего в репликах нет. Нечего сказать - пустой массив.\n"
+        " - имя НЕ извлекай. Оно есть у персонажа с рождения и в разговоре\n"
+        "   не открывается; названное собеседником прозвище — не новое имя.\n\n"
 
         "Ответ - ТОЛЬКО JSON-массив, без пояснений и без markdown. Форма:\n"
         '[{"key":"occupation", "value":"программист", "confidence":"high"}]\n\n'
@@ -1200,3 +1220,194 @@ def speak_first(turn: Turn, impulse: dict | None, client, memory=None,
     if len(text) > UTTERANCE_CHAR_LIMIT:
         text = text[:UTTERANCE_CHAR_LIMIT].rstrip() + "..."
     return text
+
+def _bearing_word(bearing: float) -> str:
+    return BEARING_WORDS[int((bearing % 360.0) / 45.0 + 0.5) % 8]
+
+
+def _round_distance(km: float) -> int:
+    """Расстояние в промпт — десятками.
+
+    `430.8 км` обещает точность, которой нет: расстояние вытянуто, а не
+    измерено, и лишняя цифра заставила бы модель искать населённый пункт
+    ровно там, вместо того чтобы назвать несколько в округе.
+    """
+    return max(10, int(round(km / 10.0)) * 10)
+
+def _build_birthplace_prompt(from_label: str, birth) -> str:
+    """Промпт места рождения. Спрашивает СПИСОК, а не один пункт.
+
+    Один пункт модель назовёт областным центром — он в корпусе чаще всех, — и
+    место рождения у всех персонажей получилось бы одно на регион. Список
+    превращает моду в один из восьми вариантов, а выбирает из него тяга.
+
+    Проверять существование названного будет геокодер, поэтому просить
+    «только реальные» приходится, но полагаться на это нельзя.
+    """
+    return (
+        "Ты - служебный проход. Задача: перечислить населённые пункты.\n\n"
+
+        f"Отправная точка - {from_label}. Нужны пункты, лежащие примерно в "
+        f"{_round_distance(birth.distance_km)} км {_bearing_word(birth.bearing)} "
+        f"оттуда.\n\n"
+
+        f"Назови {BIRTHPLACE_COUNT} штук и и они обязаны быть РАЗБРОСАНЫ\n"
+        "- В разные стороны от отправной точки, а не все в одном краю.\n"
+        "возьми РАЗНЫЕ по размеру: города,\n"
+        "посёлки, сёла. Не только областные центры - в них рождается\n"
+        "меньшинство. Только то, что существует на самом деле.\n\n"
+
+        "Формат - по одному названию в строке. Без нумерации, без пояснений,\n"
+        "без markdown, ничего до и после списка.\n"
+    )
+
+def _build_names_prompt(birth, birthplace: str) -> str:
+    """Промпт имени. Двадцать штук с причинами, а не одно имя.
+
+    **Одно имя - это мода корпуса.** Спроси «мужское имя, {место}, {год}» два
+    десятка раз, и половина ответов совпадёт. Двадцать превращают самое
+    частое в один вариант из двадцати, а тянет из списка машина - так редкое
+    выпадает с той же вероятностью, что и популярное. Нужен не правдоподобный
+    средний человек, а конкретный.
+
+    Причина просится ОТ ПЕРВОГО ЛИЦА, и это не оформление. Она станет первой
+    записью в `memories` - самым ранним, что персонаж о себе знает, и знает с
+    чужих слов. Третье лицо пришлось бы переписывать, а переписанное чужими
+    руками воспоминание перестаёт быть его.
+
+    Модель пишет двадцать причин вслепую, не зная, какая выпадет. Это тоже
+    решение: знай она заранее - выстроила бы одну красивую историю, а
+    выпавшая наугад из двадцати равно проработанных честнее.
+    """
+    return (
+        "Ты - служебный проход. Задача: перечислить имена, которые реально\n"
+        f"могли дать {GENESIS_GENDER}, родившемуся в {birth.born_at.year} году\n"
+        f"в месте под названием {birthplace}.\n\n"
+
+        f"Нужны {NAMES_COUNT} имён, и нужен РАЗБРОС, а не самые частые.\n"
+        "Обязательно включи:\n"
+        " - редкие и старомодные;\n"
+        " - привезённые роднёй из других мест;\n"
+        " - те, что здесь дают меньшинству.\n"
+        "Самое популярное имя этих лет пусть будет одним из списка, а не\n"
+        "половиной его.\n\n"
+
+        "Рядом с каждым - ОДНА фраза о том, почему могли назвать именно так.\n"
+        "Фраза пишется ОТ ЛИЦА САМОГО РЕБЁНКА, выросшего и пересказывающего\n"
+        "то, что ему рассказали: он этого не помнит и помнить не может.\n"
+        "Конкретное обстоятельство, а не рассуждение о традициях.\n\n"
+
+        "Формат - по одной строке на имя: имя, вертикальная черта, фраза.\n"
+        "Без нумерации, без markdown, ничего до и после списка.\n\n"
+
+        "Имя | Назвали в честь деда по матери, он умер за год до моего рождения.\n"
+    )
+
+def _parse_names(row: str) -> list[dict]:
+    """Строки «имя | причина» -> список. Битая строка пропускается, а не роняет.
+
+    Формат строчный, а не JSON, и это осознанно: двадцать объектов JSON модель
+    обрывает на середине заметно чаще, а обрыв уносит ВЕСЬ ответ - последняя
+    скобка не закрылась, разбор упал, генезиса нет. Строчный формат
+    деградирует по одной записи: испортилась третья - остаются девятнадцать,
+    и тянуть есть из чего.
+    """
+    out = []
+    seen = set()
+    for line in _strip_fences(row).splitlines():
+        line = line.strip().lstrip("-•*").strip()
+        if "|" not in line:
+            continue
+        name, _, reason = line.partition("|")
+        name = " ".join(name.split()).strip(".,;:")
+        reason = " ".join(reason.split())
+        if not name or not reason or len(name) > NAME_CHAR_LIMIT:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"name": name, "reason": clip_text(reason, REASON_CHAR_LIMIT)})
+    return out
+
+
+def _parse_places(row: str) -> list[str]:
+    """Названия по строке. Тот же разбор, только без второй половины."""
+    out, seen = [], set()
+    for line in _strip_fences(row).splitlines():
+        label = " ".join(line.strip().lstrip("-•*0123456789.").split()).strip(".,;:")
+        if not label or len(label) > NAME_CHAR_LIMIT:
+            continue
+        if label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        out.append(label)
+    return out
+
+def _parse_names(row: str) -> list[dict]:
+    """Строки «имя | причина» -> список. Битая строка пропускается, а не роняет.
+
+    Формат строчный, а не JSON, и это осознанно: двадцать объектов JSON модель
+    обрывает на середине заметно чаще, а обрыв уносит ВЕСЬ ответ - последняя
+    скобка не закрылась, разбор упал, генезиса нет. Строчный формат
+    деградирует по одной записи: испортилась третья - остаются девятнадцать,
+    и тянуть есть из чего.
+    """
+    out = []
+    seen = set()
+    for line in _strip_fences(row).splitlines():
+        line = line.strip().lstrip("-•*").strip()
+        if "|" not in line:
+            continue
+        name, _, reason = line.partition("|")
+        name = " ".join(name.split()).strip(".,;:")
+        reason = " ".join(reason.split())
+        if not name or not reason or len(name) > NAME_CHAR_LIMIT:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"name": name, "reason": clip_text(reason, REASON_CHAR_LIMIT)})
+    return out
+
+
+def _parse_places(row: str) -> list[str]:
+    """Названия по строке. Тот же разбор, только без второй половины."""
+    out, seen = [], set()
+    for line in _strip_fences(row).splitlines():
+        label = " ".join(line.strip().lstrip("-•*0123456789.").split()).strip(".,;:")
+        if not label or len(label) > NAME_CHAR_LIMIT:
+            continue
+        if label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        out.append(label)
+    return out
+
+def propose_birthplaces(from_label: str, birth, client) -> list[str]:
+    """Список населённых пунктов в стороне тяги. Неудача -> пусто."""
+    try:
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL,
+            messages=[{"role": "user",
+                       "content": _build_birthplace_prompt(from_label, birth)}],
+        )
+    except OpenAIError as err:
+        logging.warning("genesis: места не пришли: %s", err)
+        return []
+    return _parse_places(response.choices[0].message.content or "")
+
+
+def propose_names(birth, birthplace: str, client) -> list[dict]:
+    """Двадцать имён с причинами. Неудача -> пусто."""
+    try:
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL,
+            messages=[{"role": "user",
+                       "content": _build_names_prompt(birth, birthplace)}],
+        )
+    except OpenAIError as err:
+        logging.warning("genesis: имена не пришли: %s", err)
+        return []
+    return _parse_names(response.choices[0].message.content or "")

@@ -113,7 +113,7 @@ def humanize_age(then: datetime | None, now: datetime) -> str | None:
 def render_now(now: datetime) -> str:
     """'пятница, 14 августа, 19:40'. На вход — уже локальное время."""
     return (
-        f"{WEEKDAYS[now.weekday()]}, {now.day} {MONTHS[now.month - 1]}, "
+        f"{WEEKDAYS[now.weekday()]}, {now.day} {MONTHS[now.month - 1]} "
         f"{now.year}-го, {now.hour:02d}:{now.minute:02d}"
     )
 
