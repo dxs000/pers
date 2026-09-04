@@ -51,7 +51,7 @@ from snapshot import (SESSION_GAP_HOURS, WORKING_MEMORY_EXCHANGES, Turn, iso,
 # Порог отсечки по важности. Был продублирован из `store` (движок не может
 # зависеть от движка); с Шага 26 копия одна и живёт здесь.
 SALIENCE_FLOOR = 0.05
-
+MEMORIES_LIMIT = 3
 SELF_ID = 0
 
 # Затухание побуждения. Форма та же, что у важности объектов
@@ -167,13 +167,13 @@ def _assertions_by_object(conn, object_ids: list[int]) -> dict[int, list[dict]]:
 def build_snapshot(conn, now, limit: int = 7) -> Turn:
     """Снимок хода из базы. Та же форма, что у `store.build_snapshot`.
 
-    Пять запросов на ход, и это осознанно: агрегировать всё в один
+    Шесть запросов на ход, и это осознанно: агрегировать всё в один
     `JOIN` значило бы собирать снимок в SQL, а он собирается в Python —
     иначе `mind` окажется зависим от формы запроса.
     """
     agent = conn.execute(
         """
-        SELECT name, traits, mood, place_label, outside_latch
+        SELECT name, born_at, birthplace, traits, mood, place_label, outside_latch
           FROM agent WHERE id = 1
         """
     ).fetchone() or {}
@@ -217,10 +217,29 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
         """
     ).fetchall()
 
+    # Правило отбора ВРЕМЕННОЕ, и это сказано вслух, чтобы его не приняли за
+    # решение. Затухания у воспоминаний пока нет: период `effective_salience`
+    # — 72 часа, что верно для всплывающего объекта и абсурдно для
+    # воспоминания, обязанного пережить неделю молчания. Пока писателя
+    # `weight` не существует, все значения приходят из фикстура, и порядок по
+    # нему детерминирован. Заменяется на шаге, который заводит проход
+    # воспоминания.
+    memories = conn.execute(
+        """
+        SELECT id, happened_at, precision, text, source, weight
+          FROM memories
+         ORDER BY weight DESC, happened_at, id
+         LIMIT %s
+        """,
+        (MEMORIES_LIMIT,),
+    ).fetchall()
+
     by_object = _assertions_by_object(conn, [r["id"] for r in top] + [SELF_ID])
 
     return Turn(
         name=agent.get("name", "Некто"),
+        born_at=iso(agent.get("born_at")),
+        birthplace=agent.get("birthplace"),
         traits=tuple(agent.get("traits") or ()),
         mood=agent.get("mood", "нейтральное"),
         place_label=agent.get("place_label"),
@@ -249,6 +268,17 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
         registry=[
             {"id": f"obj_{r['id']}", "label": r["label"], "aliases": list(r["aliases"])}
             for r in registry_rows
+        ],
+        memories=[
+            {
+                "id": f"mem_{m['id']}",
+                "happened_at": iso(m["happened_at"]),
+                "precision": m["precision"],
+                "text": m["text"],
+                "source": m["source"],
+                "weight": m["weight"],
+            }
+            for m in memories
         ],
     )
 
@@ -297,7 +327,8 @@ def _fill_fixture(conn, state: dict) -> None:
     # `messages`, обязана быть названа тут поимённо, иначе изоляция сценариев
     # через неё течёт.
     conn.execute("TRUNCATE objects, assertions, episodes, aliases, sessions, "
-                 "messages, impulses RESTART IDENTITY CASCADE")
+                 "messages, impulses, memories RESTART IDENTITY CASCADE") 
+    
     conn.execute(
         """
         -- `last_search_ts` сбрасывается в NULL, а не приезжает из фикстура:
@@ -311,13 +342,15 @@ def _fill_fixture(conn, state: dict) -> None:
         -- того, что прогонялось перед ним. Изоляцию сценариев даёт TRUNCATE,
         -- а `agent` он не трогает (строка одна и обязана жить), поэтому
         -- каждое поле здесь названо поимённо.
-        UPDATE agent SET name=%s, traits=%s, mood=%s, place_label=%s,
-               place_lat=%s, place_lon=%s, outside_latch=%s, last_exchange_ts=%s,
-               last_search_ts=NULL
+        UPDATE agent SET name=%s, born_at=%s, birthplace=%s, traits=%s, mood=%s,
+               place_label=%s, place_lat=%s, place_lon=%s, outside_latch=%s,
+               last_exchange_ts=%s, last_search_ts=NULL
          WHERE id = 1
         """,
         (
             self.get("name", "Некто"),
+            self.get("born_at"),
+            self.get("birthplace"),
             list(self.get("traits", [])),
             self.get("mood", "нейтральное"),
             place.get("label"),
@@ -335,6 +368,16 @@ def _fill_fixture(conn, state: dict) -> None:
         (SELF_ID,),
     )
     _insert_assertions(conn, SELF_ID, self.get("assertions", []))
+
+    for m in state.get("memories", []):
+        conn.execute(
+            """
+            INSERT INTO memories (happened_at, precision, text, source, weight)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (m["happened_at"], m["precision"], m["text"], m["source"],
+             m.get("weight", 1.0)),
+        )
 
     for oid, o in state.get("objects", {}).items():
         num = int(str(oid).removeprefix("obj_"))

@@ -699,7 +699,7 @@ def _fresh_engine():
     """
     eng = _shared_pg()
     eng.conn.execute("TRUNCATE objects, assertions, episodes, aliases, "
-                     "sessions, messages RESTART IDENTITY CASCADE")
+                     "sessions, messages, memories RESTART IDENTITY CASCADE")
     eng.conn.execute("UPDATE agent SET name = DEFAULT, traits = DEFAULT, "
                      "mood = DEFAULT, place_label = NULL, place_lat = NULL, "
                      "place_lon = NULL, outside_latch = NULL WHERE id = 1")
