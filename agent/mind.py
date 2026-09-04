@@ -126,7 +126,7 @@ def build_system_prompt(
     mood = turn.mood
 
     born = timeutil.parse_ts(turn.born_at or "")
-    age = _age_years(born, now)
+    age = timeutil.age_years(born, now)
 
     # Имя, возраст и происхождение — ОДНОЙ строкой, а не тремя.
     # Тремя они выглядели бы анкетой, а это первое, что модель читает о себе:
@@ -857,22 +857,6 @@ def _render_episodes(episodes, now) -> str | None:
 # Григорианский год со всеми високосными. Точность тут избыточна на глаз, но
 # `days // 365` даёт лишний год у всякого, кто прожил больше сорока, и
 # промахивается именно на круглых датах — там, где ошибку заметит человек.
-DAYS_IN_YEAR = 365.2425
-
-
-def _age_years(born: datetime | None, at: datetime | None) -> int | None:
-    """Сколько лет исполнилось к моменту `at`. Нет метки -> None.
-
-    То же правило, что у `humanize_age`: за отсутствие метки не наказываем.
-    Отрицательный возраст (событие раньше рождения) тоже даёт None — такое
-    воспоминание существует законно, это рассказанное о том, что было до
-    тебя, и рендерится оно отдельной веткой, а не числом «минус один».
-    """
-    if born is None or at is None:
-        return None
-    years = int((at - born).days // DAYS_IN_YEAR)
-    return years if years >= 0 else None
-
 
 def _years_word(n: int) -> str:
     """год / года / лет. Живёт здесь, потому что читателей два: строка про
@@ -901,7 +885,7 @@ def _memory_when(m: dict, born: datetime | None) -> str:
     читателя дороже, чем не называть месяц вовсе.
     """
     at = timeutil.parse_ts(m.get("happened_at") or "")
-    age = _age_years(born, at)
+    age = timeutil.age_years(born, at)
     if age is None or age < FIRST_MEMORY_AGE:
         return "ещё до всякой твоей памяти, с чужих слов"
     grain = m.get("precision")

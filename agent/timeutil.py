@@ -23,6 +23,8 @@ MONTHS = (
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
 )
 
+DAYS_IN_YEAR = 365.2425
+
 # Возраст памяти — нарочно нечёткий и без календарных обещаний:
 # метки описывают прошедшее время, а не дату, поэтому не зависят от TZ
 # и не врут на границе суток. (порог в часах, ярлык)
@@ -112,5 +114,17 @@ def render_now(now: datetime) -> str:
     """'пятница, 14 августа, 19:40'. На вход — уже локальное время."""
     return (
         f"{WEEKDAYS[now.weekday()]}, {now.day} {MONTHS[now.month - 1]}, "
-        f"{now.hour:02d}:{now.minute:02d}"
+        f"{now.year}-го, {now.hour:02d}:{now.minute:02d}"
     )
+
+def age_years(born: datetime | None, at: datetime | None) -> int | None:
+    """Сколько полных лет исполнилось к моменту `at`. Нет метки -> None.
+
+    То же правило, что у `humanize_age`: за отсутствие метки не наказываем.
+    Отрицательный возраст тоже даёт None — событие раньше рождения законно
+    (рассказанное о том, что было до тебя) и рендерится отдельной веткой.
+    """
+    if born is None or at is None:
+        return None
+    years = int((at - born).days // DAYS_IN_YEAR)
+    return years if years >= 0 else None

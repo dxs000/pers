@@ -662,6 +662,16 @@ _TURN = {"turn": None, "inbox": None, "client": None}
 # заговаривает сам, и единственный вход у этого хода — время.
 _INITIATIVE = {"initiative": None}
 
+_GENESIS_TEXTS = [
+    "привет", "ты кто?", "Привет! Как тебя зовут?", "эй",
+    "расскажи о себе", "ну здравствуй", "?",
+    "кто ты такой и что ты умеешь",
+]
+_GENESIS_PLACE = ("Тбилиси", 41.6938, 44.8015)
+
+_GENESIS = {"genesis": None}
+
+
 # Шестое семейство: читающая сторона инспектора (Шаг 30). Смотрит не на
 # промпт и не на запись, а на ТРЕТИЙ выход из хранилища — тот, которым
 # Фаза 4a покажет память человеку.
@@ -673,7 +683,7 @@ _INSPECT = {"inspector": None}
 _HTTP = {"http": None}
 
 SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
-             **_INSPECT, **_HTTP}
+             **_INSPECT, **_HTTP, **_GENESIS}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
 #
@@ -1653,6 +1663,70 @@ def _run_client() -> str:
         f"\n{'=' * 60}\n{_dump_inbox(eng)}"
     )
 
+def _genesis_point(b) -> str:
+    if b.same_place:
+        return "там же"
+    if b.lat is None:
+        return "—"
+    return f"{b.lat:>8.4f}, {b.lon:>8.4f}"
+
+
+def _run_genesis() -> str:
+    """Тяга рождения: разброс, инварианты, деградация без координат.
+
+    Базы здесь нет, и это свойство шага, а не сбруи: тяга обязана быть чистой
+    функцией, и сценарий, которому понадобилось бы хранилище, показал бы, что
+    она таковой быть перестала.
+
+    Рамки печатаются строкой, потому что они и есть решение шага. Сдвинь
+    кто-нибудь `AGE_BAND` — и эталон покраснеет первой строкой, а не восемью
+    датами, из которых пришлось бы догадываться, что именно изменилось.
+    """
+    import genesis as genesis_mod
+
+    place, lat, lon = _GENESIS_PLACE
+    lines = [
+        f"рамки мира: возраст {genesis_mod.AGE_BAND[0]}–{genesis_mod.AGE_BAND[1]}, "
+        f"радиус {genesis_mod.BIRTH_RADIUS_KM:.0f} км, "
+        f"«там же» ближе {genesis_mod.SAME_PLACE_KM:.0f} км",
+        f"место жизни: {place} ({lat}, {lon}), момент: {iso(NOW)}",
+        "=" * 60,
+        f"{'первая реплика':<30} | {'родился':<10} | {'лет':>3} | "
+        f"{'азимут':>6} | {'км':>6} | точка рождения",
+    ]
+    for text in _GENESIS_TEXTS:
+        b = genesis_mod.draw(place, lat, lon, text, NOW)
+        lines.append(
+            f"{text:<30} | {b.born_at.date().isoformat():<10} | {b.age:>3} | "
+            f"{b.bearing:>6.1f} | {b.distance_km:>6.1f} | {_genesis_point(b)}"
+        )
+
+    # Инварианты вердиктами, а не числами: сломайся нормализация — покраснеет
+    # строка «да» -> «НЕТ», и читать дифф не придётся.
+    base = genesis_mod.draw(place, lat, lon, _GENESIS_TEXTS[0], NOW)
+    checks = [
+        ("пояс не влияет",
+         base == genesis_mod.draw(place, lat, lon, _GENESIS_TEXTS[0],
+                                  NOW.astimezone(TZ))),
+        ("регистр и пробелы не влияют",
+         base == genesis_mod.draw("  ТБИЛИСИ ", lat, lon,
+                                  f" {_GENESIS_TEXTS[0]}  ", NOW)),
+        ("секунда меняет человека",
+         base != genesis_mod.draw(place, lat, lon, _GENESIS_TEXTS[0],
+                                  NOW + timedelta(seconds=1))),
+    ]
+    lines.append("=" * 60)
+    lines += [f"{name}: {'да' if ok else 'НЕТ'}" for name, ok in checks]
+
+    blind = genesis_mod.draw(place, None, None, _GENESIS_TEXTS[0], NOW)
+    lines.append("=" * 60)
+    lines.append(
+        f"без координат места жизни: родился {blind.born_at.date()}, "
+        f"{blind.distance_km:.1f} км по азимуту {blind.bearing:.1f}, "
+        f"точка не считается ({blind.lat})"
+    )
+    return "\n".join(lines)
+
 
 def render(name: str) -> str:
     """Собрать артефакт сценария. Ни часов, ни сети, ни `.env` — только база."""
@@ -1677,6 +1751,8 @@ def render(name: str) -> str:
         return _run_session()
     if name in _WRITES:
         return _run_writes()
+    if name == "genesis":
+        return _run_genesis()
 
     if name in _EMPTY_SCENARIOS:
         return build_system_prompt(_fresh_engine().snapshot(NOW),
