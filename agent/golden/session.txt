@@ -115,14 +115,6 @@ session_stale(+4ч) = True
   "place_label": "Тбилиси",
   "self_assertions": [
     {
-      "key": "name",
-      "value": "Костя",
-      "confidence": "high",
-      "hits": 3,
-      "ts": "2026-01-02T21:00:00+00:00",
-      "source": "self"
-    },
-    {
       "key": "occupation",
       "value": "редактор",
       "confidence": "high",
