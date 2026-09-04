@@ -2,7 +2,7 @@ import config
 import logging
 import json
 import timeutil
-from datetime import datetime
+from datetime import datetime, timezone
 from openai import OpenAIError
 from snapshot import Turn, clip_text
 
@@ -100,6 +100,13 @@ _WEATHER_PHRASES = set(WEATHER_STARTED.values()) | set(WEATHER_ENDED.values())
 # очевидного. Тот же дух, что у бакетов возраста: память нечёткая.
 LATCH_FRESH_HOURS = 6.0
 WEATHER_APPARENT_GAP = 5.0   # ниже — «ощущается как» не стоит упоминания
+
+# Возраст, раньше которого своих воспоминаний не бывает. Всё, что человек
+# «помнит» о себе до него, ему рассказали. Число не медицинское, а смысловое:
+# рендер обязан отличать пережитое от пересказанного, иначе персонаж заявит,
+# будто помнит собственное рождение, — и это будет первое, что он о себе
+# прочитает.
+FIRST_MEMORY_AGE = 4
 
 def build_system_prompt(
     turn: Turn,
@@ -895,7 +902,7 @@ def _memory_when(m: dict, born: datetime | None) -> str:
     """
     at = timeutil.parse_ts(m.get("happened_at") or "")
     age = _age_years(born, at)
-    if age is None:
+    if age is None or age < FIRST_MEMORY_AGE:
         return "ещё до всякой твоей памяти, с чужих слов"
     grain = m.get("precision")
     if grain == "day" and at is not None:
