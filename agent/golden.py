@@ -697,13 +697,13 @@ def _fresh_engine():
     `APP_PLACE`/`APP_LAT` — единственное, что движок берёт из окружения, а
     эталон обязан совпадать на машине, где `.env` другой.
     """
-    born_at = NULL, birthplace = NULL
     eng = _shared_pg()
     eng.conn.execute("TRUNCATE objects, assertions, episodes, aliases, "
                      "sessions, messages, memories RESTART IDENTITY CASCADE")
-    eng.conn.execute("UPDATE agent SET name = DEFAULT, traits = DEFAULT, "
-                     "mood = DEFAULT, place_label = NULL, place_lat = NULL, "
-                     "place_lon = NULL, outside_latch = NULL WHERE id = 1")
+    eng.conn.execute("UPDATE agent SET name = DEFAULT, born_at = NULL,"
+                     "birthplace = NULL, traits = DEFAULT,  mood = DEFAULT,"
+                     "place_label = NULL, place_lat = NULL, place_lon = NULL," 
+                     "outside_latch = NULL WHERE id = 1")
     eng._ensure_agent()
     eng.conn.execute("UPDATE agent SET place_label = NULL WHERE id = 1")
     return eng
