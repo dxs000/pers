@@ -118,12 +118,24 @@ def build_system_prompt(
     name = turn.name
     mood = turn.mood
 
+    born = timeutil.parse_ts(turn.born_at or "")
+    age = _age_years(born, now)
+
+    # Имя, возраст и происхождение — ОДНОЙ строкой, а не тремя.
+    # Тремя они выглядели бы анкетой, а это первое, что модель читает о себе:
+    # анкета в первой строке задаёт тон всему ответу.
+    who = f"Тебя зовут {name}"
+    if age is not None:
+        who += f", тебе {age} {_years_word(age)}"
+    if turn.birthplace:
+        who += f", родом ты из {turn.birthplace}"
+
     parts = []
 
     traits_string = turn.traits_line
 
     parts.append(
-        f"Тебя зовут {name}. "
+        f"{who}. "
         f"Твои черты характера: {traits_string}. "
         f"Сейчас твое настроение - {mood}"
     )
@@ -147,6 +159,13 @@ def build_system_prompt(
     if picked:
         lines = "\n".join(f"- {a['key']}: {a['value']}" for a in picked)
         parts.append("Что ты знаешь о себе:\n" + lines)
+
+    memories_block = _render_memories(turn.memories, born)
+    if memories_block:
+        parts.append(
+            "Что тебе сейчас вспоминается "
+            "(упоминай, только если к месту):\n" + memories_block
+        )    
 
     episodes_block = _render_episodes(turn.episodes, now)
     if episodes_block:
@@ -824,6 +843,98 @@ def _render_episodes(episodes, now) -> str | None:
         head = f"[{age}] " if age else ""
         lines.append(f"- {head}{ep['summary'].strip()}")
     return "\n".join(lines)
+
+# =============================================================================
+# Биография (Шаг 36)
+# =============================================================================
+# Григорианский год со всеми високосными. Точность тут избыточна на глаз, но
+# `days // 365` даёт лишний год у всякого, кто прожил больше сорока, и
+# промахивается именно на круглых датах — там, где ошибку заметит человек.
+DAYS_IN_YEAR = 365.2425
+
+
+def _age_years(born: datetime | None, at: datetime | None) -> int | None:
+    """Сколько лет исполнилось к моменту `at`. Нет метки -> None.
+
+    То же правило, что у `humanize_age`: за отсутствие метки не наказываем.
+    Отрицательный возраст (событие раньше рождения) тоже даёт None — такое
+    воспоминание существует законно, это рассказанное о том, что было до
+    тебя, и рендерится оно отдельной веткой, а не числом «минус один».
+    """
+    if born is None or at is None:
+        return None
+    years = int((at - born).days // DAYS_IN_YEAR)
+    return years if years >= 0 else None
+
+
+def _years_word(n: int) -> str:
+    """год / года / лет. Живёт здесь, потому что читателей два: строка про
+    самого персонажа и строка про его возраст в момент воспоминания."""
+    if 11 <= n % 100 <= 14:
+        return "лет"
+    last = n % 10
+    if last == 1:
+        return "год"
+    if last in (2, 3, 4):
+        return "года"
+    return "лет"
+
+
+def _memory_when(m: dict, born: datetime | None) -> str:
+    """Когда это было — так, как об этом сказал бы человек.
+
+    **Датой почти никогда, возрастом почти всегда.** «1 сентября 2000 года»
+    — форма записи в личном деле; свою жизнь помнят как «мне было семь».
+    Точная дата остаётся только там, где `precision` прямо говорит, что она
+    известна до дня: такое воспоминание есть, но оно редкость, и именно
+    поэтому дата в нём значима.
+
+    Заодно это обходит падежи: `timeutil.MONTHS` родительные («марта»), и
+    «в марте» из них не собрать. Заводить вторую таблицу месяцев ради одного
+    читателя дороже, чем не называть месяц вовсе.
+    """
+    at = timeutil.parse_ts(m.get("happened_at") or "")
+    age = _age_years(born, at)
+    if age is None:
+        return "ещё до всякой твоей памяти, с чужих слов"
+    grain = m.get("precision")
+    if grain == "day" and at is not None:
+        return f"{at.day} {timeutil.MONTHS[at.month - 1]} {at.year}-го, тебе было {age}"
+    if grain == "era":
+        # Единственная нечёткая ветка. «Лет семь» — не то же, что «семь»:
+        # `era` означает, что дата поставлена приблизительно, и промпт не
+        # должен выдавать приблизительное за точное.
+        return f"тебе было лет {age}"
+    return f"тебе было {age}"
+
+
+def _render_memories(memories: list[dict] | None, born: datetime | None) -> str | None:
+    """Блок воспоминаний. Порядок — по жизни, а не по весу.
+
+    Хранилище отдаёт их отсортированными по весу: это порядок ОТБОРА, и он
+    отвечает на «какие всплыли». В промпте он читался бы как порядок
+    важности, а важность у воспоминаний не та ось. Сортируем по времени, как
+    `_pick_episodes` разворачивает ленту, — от раннего к позднему.
+
+    Без `born` блока нет: без точки отсчёта каждая строка получила бы
+    «ещё до всякой твоей памяти», то есть блок, который врёт целиком.
+    """
+    if not memories or born is None:
+        return None
+
+    ordered = sorted(
+        memories,
+        key=lambda m: timeutil.parse_ts(m.get("happened_at") or "")
+        or datetime.max.replace(tzinfo=timezone.utc),
+    )
+
+    lines = []
+    for m in ordered:
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        lines.append(f"- [{_memory_when(m, born)}] {text}")
+    return "\n".join(lines) if lines else None
 
 
 def decide_query(user_text: str, objects: list[dict], client) -> str | None:
