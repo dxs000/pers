@@ -697,6 +697,7 @@ def _fresh_engine():
     `APP_PLACE`/`APP_LAT` — единственное, что движок берёт из окружения, а
     эталон обязан совпадать на машине, где `.env` другой.
     """
+    born_at = NULL, birthplace = NULL
     eng = _shared_pg()
     eng.conn.execute("TRUNCATE objects, assertions, episodes, aliases, "
                      "sessions, messages, memories RESTART IDENTITY CASCADE")
