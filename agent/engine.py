@@ -58,6 +58,10 @@ class PgEngine:
         return self._pg.add_memory(self.conn, happened_at, precision, text,
                                    source, weight)
 
+    def record_birth(self, name: str, born_at, birthplace: str | None,
+                     reason: str) -> bool:
+        return self._pg.record_birth(self.conn, name, born_at, birthplace, reason)
+
     def outside_latch(self) -> dict:
         return self._pg.outside_latch(self.conn)
 

@@ -698,6 +698,13 @@ _INITIATIVE = {"initiative": None}
 # по одному, их надо проверить рядом, в одном прогоне и на одном каноне.
 _BIOGRAPHY = {"biography": None}
 
+# Рождение как ЗАПИСЬ (Шаг 39). Сценарий `genesis` рядом смотрит на тягу —
+# чистую функцию без базы; этот смотрит на то, что тяга оставляет в
+# хранилище. Разделены намеренно: тяга проверяется разбросом на восьми
+# входах, запись — единственностью на одном, и слить их значило бы восемь
+# раз родить персонажа ради одной проверки.
+_BIRTH = {"birth": None}
+
 _GENESIS_TEXTS = [
     "привет", "ты кто?", "Привет! Как тебя зовут?", "эй",
     "расскажи о себе", "ну здравствуй", "?",
@@ -719,7 +726,7 @@ _INSPECT = {"inspector": None}
 _HTTP = {"http": None}
 
 SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
-             **_BIOGRAPHY,
+             **_BIOGRAPHY, **_BIRTH,
              **_INSPECT, **_HTTP, **_GENESIS}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
@@ -1301,6 +1308,73 @@ _BIO_CASES = [
      "[]",
      None),
 ]
+
+
+# --- Сценарий РОЖДЕНИЯ как записи (Шаг 39) ----------------------------------
+# Единственность важнее содержания, поэтому проверяется она, а не имя.
+#
+# Три состояния, и второе — главное:
+#   1. пустое хранилище      -> запись проходит, персонаж появляется
+#   2. ПОВТОРНАЯ запись      -> отказ, и НИЧЕГО не изменено
+#   3. промпт после рождения -> имя, возраст, место и первое воспоминание
+#
+# Второе главное потому, что провал там необратим. Объект можно слить,
+# ассершен обновить, настроение перезаписать; второе рождение поверх первого
+# оставило бы персонажа с именем от одного человека и датой от другого, а
+# воспоминание от обоих — и починить это нечем.
+#
+# Числа рождения тут СВОИ, а не от `genesis.draw`: сценарий про запись, и
+# тянуть их значило бы уронить его на любой правке тяги — то есть красить
+# запись по причине, к записи не относящейся.
+BIRTH_NOW = NOW + timedelta(hours=20)
+BIRTH_AT = NOW - timedelta(days=int(32 * timeutil.DAYS_IN_YEAR))
+BIRTH_NAME = "Костя"
+BIRTH_PLACE = "Кутаиси"
+BIRTH_REASON = ("Назвали в честь деда по матери. Он умер за месяц до моего "
+                "рождения, и мать считала это плохой приметой.")
+
+
+def _run_birth() -> str:
+    """Рождение записывается ровно один раз.
+
+    Хранилище берётся ПУСТОЕ (`_fresh_engine`), а не фикстурное: фикстур
+    приезжает с уже прожитой жизнью, и родить в нём значило бы проверять
+    запись поверх того, чего при первом запуске не бывает.
+    """
+    eng = _fresh_engine()
+
+    first = eng.record_birth(BIRTH_NAME, BIRTH_AT, BIRTH_PLACE, BIRTH_REASON)
+    after_first = eng.snapshot(BIRTH_NOW)
+    mem_first = eng.all_memories()
+
+    # Вторая попытка — с ДРУГИМИ данными: совпадающие прошли бы и при
+    # сломанной защите, ничего не изменив, и сценарий остался бы зелёным.
+    second = eng.record_birth("Другой", BIRTH_AT - timedelta(days=3000),
+                              "Батуми", "Другая причина.")
+    after_second = eng.snapshot(BIRTH_NOW)
+    mem_second = eng.all_memories()
+
+    prompt = mind.build_system_prompt(after_second, BIRTH_NOW)
+
+    return (
+        f"первая запись:  принята = {first}\n"
+        f"  name = {after_first.name}, born_at = {after_first.born_at}, "
+        f"birthplace = {after_first.birthplace}\n"
+        f"  воспоминаний: {len(mem_first)}\n"
+        f"{'=' * 60}\n"
+        f"вторая запись (другое имя, дата, место): принята = {second}\n"
+        f"  name = {after_second.name}, born_at = {after_second.born_at}, "
+        f"birthplace = {after_second.birthplace}\n"
+        f"  воспоминаний: {len(mem_second)}\n"
+        f"  изменилось хоть что-нибудь: "
+        f"{(after_first != after_second) or (mem_first != mem_second)}\n"
+        f"{'=' * 60}\n"
+        "первое воспоминание:\n"
+        + "\n".join(f"  [{m['happened_at'][:10]} {m['precision']} {m['source']}] "
+                     f"{m['text']}" for m in mem_second)
+        + f"\n{'=' * 60}\n"
+        f"промпт родившегося:\n{prompt}"
+    )
 
 
 def _run_biography() -> str:
@@ -1900,6 +1974,8 @@ def render(name: str) -> str:
     if name not in SCENARIOS:
         raise KeyError(name)
 
+    if name == "birth":
+        return _run_birth()
     if name == "biography":
         return _run_biography()
     if name == "initiative":

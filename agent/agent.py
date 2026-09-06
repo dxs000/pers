@@ -183,21 +183,37 @@ def serve(eng, edges: cycle.Edges) -> None:
 
 
 def cmd_genesis(first_text: str, write: bool) -> int:
-    """Сухой прогон рождения. Пишет только то, что печатает.
+    """Рождение персонажа. Без `--write` только печатает.
 
-    Записи нет и на этом шаге не будет: `--write` отвергается вслух, чтобы
-    флаг не выглядел забытым. Она придёт 36.3c вместе с nullable `name` и
-    связкой `handle_pending`.
+    **Печать по умолчанию, запись по явному слову** — тот же предохранитель,
+    что у `db.py --reset --prod`, и по той же причине: действие необратимо.
+    Разница лишь в том, что там стиралась память, а здесь появляется жизнь,
+    которую нельзя переиграть, не заведя другую базу.
+
+    Предохранитель нужен ещё и потому, что рождение СЛУЧАЙНО: тяга берёт
+    энтропию из места, момента и первых слов (`genesis`), и каждый прогон
+    даёт другого человека. Посмотреть на нескольких, прежде чем оставить
+    одного, — законный сценарий, и он не должен требовать правки кода.
     """
-    if write:
-        logging.error("запись генезиса ещё не сделана (36.3c). "
-                      "Пока только --dry-run")
-        return 2
 
     edges = cycle.open_edges()
     eng = engine_mod.open_engine()
     try:
         now = datetime.now(timezone.utc)
+
+        # Проверка ДО тяги, а не перед записью. Родившемуся персонажу план
+        # показывать незачем: он предъявил бы другое имя и другую дату, чем
+        # те, что у персонажа есть, — то есть выглядел бы предложением
+        # переродиться, которого система не принимает. Дешевле и честнее
+        # сказать это первой строкой, не сходив ни в модель, ни в геокодер.
+        turn = eng.snapshot(now)
+        if turn.born_at:
+            print(f"персонаж уже родился: {turn.name}, {turn.born_at[:10]}, "
+                  f"{turn.birthplace}")
+            print("Рождение необратимо и бывает один раз. Чтобы получить "
+                  "другого персонажа, нужна другая база.")
+            return 1
+
         resolve_place(eng, edges, now)
         place = eng.place()
         if not place.get("label"):
@@ -210,7 +226,8 @@ def cmd_genesis(first_text: str, write: bool) -> int:
         print(f"\nмир:      {place['label']} ({place.get('lat')}, "
               f"{place.get('lon')}), {now.isoformat(timespec='seconds')}")
         print(f"первые слова: {first_text!r}")
-        print(f"\nтяга:     родился {b.born_at.date()}, сейчас {b.age} лет")
+        print(f"\nтяга:     родился {b.born_at.date()}, "
+              f"сейчас {b.age} {timeutil.years_word(b.age)}")
         print(f"          {b.distance_km:.1f} км, азимут {b.bearing:.1f}"
               + (f" -> {b.lat}, {b.lon}" if b.lat is not None else "")
               + ("  (там же, где живёт)" if b.same_place else ""))
@@ -241,12 +258,30 @@ def cmd_genesis(first_text: str, write: bool) -> int:
             print("\nГЕНЕЗИС НЕ СОСТОЯЛСЯ — записывать было бы нечего")
             return 1
 
-        print(f"\nБЫЛО БЫ ЗАПИСАНО:")
-        print(f"  agent.name       = {plan.name}")
-        print(f"  agent.born_at    = {b.born_at.isoformat()}")
-        print(f"  agent.birthplace = {plan.birthplace}")
-        print(f"  memories[1]      = ('era', 'genesis', {b.born_at.date()})")
-        print(f"                     {plan.reason}")
+        if not write:
+            print(f"\nБЫЛО БЫ ЗАПИСАНО (добавьте --write):")
+            print(f"  agent.name       = {plan.name}")
+            print(f"  agent.born_at    = {b.born_at.isoformat()}")
+            print(f"  agent.birthplace = {plan.birthplace}")
+            print(f"  memories[1]      = ('era', 'genesis', {b.born_at.date()})")
+            print(f"                     {plan.reason}")
+            return 0
+
+        with eng.unit():
+            born = eng.record_birth(plan.name, b.born_at, plan.birthplace,
+                                    plan.reason)
+        if not born:
+            # Сюда можно попасть, только если персонаж родился МЕЖДУ проверкой
+            # наверху и этой строкой — то есть вторым запуском, шедшим
+            # параллельно. Гонка невероятная (рождение делают руками один
+            # раз), но отвечает на неё база, а не наша уверенность в том, что
+            # так не бывает.
+            print("\nЗАПИСЬ НЕ СОСТОЯЛАСЬ: персонаж уже родился. "
+                  "Ничего не изменено.")
+            return 1
+
+        print(f"\nРОДИЛСЯ: {plan.name}, {b.born_at.date()}, {plan.birthplace}")
+        print(f"  первое воспоминание: {plan.reason}")
         return 0
     finally:
         eng.close()
@@ -257,9 +292,15 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Демон персонажа.")
     parser.add_argument("--genesis", action="store_true",
-                            help="прогнать рождение")
-    parser.add_argument("--dry-run", action="store_true",
-                            help="только напечатать, ничего не писать")
+                            help="прогнать рождение (только печать)")
+    # `--write` вместо прежнего `--dry-run`, и это разворот умолчания.
+    # Раньше `--genesis` без флагов означал «записать», а безопасный прогон
+    # требовал слова. При необратимом действии умолчание обязано быть
+    # безобидным: опечатка стоит одного лишнего запуска, а не одной чужой
+    # жизни. Флаг `--dry-run` снят, а не оставлен синонимом, — молчаливо
+    # принятый флаг, который больше ничего не значит, хуже отсутствующего.
+    parser.add_argument("--write", action="store_true",
+                            help="записать рождение (необратимо)")
     parser.add_argument("--text", default="привет",
                             help="первые слова, сказанные персонажу")
     args = parser.parse_args()
@@ -270,7 +311,7 @@ def main() -> int:
     )
         
     if args.genesis:
-        return cmd_genesis(args.text, write=not args.dry_run)
+        return cmd_genesis(args.text, write=args.write)
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     try:

@@ -150,7 +150,7 @@ def build_system_prompt(
     # анкета в первой строке задаёт тон всему ответу.
     who = f"Тебя зовут {name}" if name else None
     if who and age is not None:
-        who += f", тебе {age} {_years_word(age)}"
+        who += f", тебе {age} {timeutil.years_word(age)}"
     if who and turn.birthplace:
         who += f", родом ты из {turn.birthplace}"
 
@@ -878,19 +878,6 @@ def _render_episodes(episodes, now) -> str | None:
 # `days // 365` даёт лишний год у всякого, кто прожил больше сорока, и
 # промахивается именно на круглых датах — там, где ошибку заметит человек.
 
-def _years_word(n: int) -> str:
-    """год / года / лет. Живёт здесь, потому что читателей два: строка про
-    самого персонажа и строка про его возраст в момент воспоминания."""
-    if 11 <= n % 100 <= 14:
-        return "лет"
-    last = n % 10
-    if last == 1:
-        return "год"
-    if last in (2, 3, 4):
-        return "года"
-    return "лет"
-
-
 def _memory_when(m: dict, born: datetime | None) -> str:
     """Когда это было — так, как об этом сказал бы человек.
 
@@ -1479,11 +1466,11 @@ def _build_biographer_prompt(turn: Turn, user_text: str, answer: str,
         "Ты - служебный проход биограф. Задача: посмотреть, не рассказал ли "
         "персонаж о СОБЫТИИ из своей жизни, и записать его.\n\n"
 
-        # `_years_word`, а не «лет»: третий читатель того же согласования.
+        # `years_word`, а не «лет»: третий читатель того же согласования.
         # «Ему 32 лет» в промпте служебного прохода — та же небрежность, что
         # в реплике персонажа, и модель, читающая кривой русский, отвечает
         # кривым русским.
-        f"Персонажа зовут {turn.name}. Ему {age_now} {_years_word(age_now)}.\n\n"
+        f"Персонажа зовут {turn.name}. Ему {age_now} {timeutil.years_word(age_now)}.\n\n"
 
         "Что уже записано о его жизни:\n"
         f"{_render_canon(canon, born)}\n\n"
