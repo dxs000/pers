@@ -1192,10 +1192,18 @@ _INITIATIVE_SCRIPT = [
 
 
 def _render_urges(urges) -> str:
+    """СОБЫТИЯ, замеченные заходом. Тишины здесь НЕТ, и это видно.
+
+    С Шага 37 тишина — состояние, а не событие: она вычисляется
+    `cycle.silence_urge` и в таблицу не попадает. Её сила печатается ниже
+    отдельной строкой, ровно чтобы отсутствие в этом списке читалось как
+    решение, а не как пропажа.
+    """
     if not urges:
         return "  (ничего)"
     return "\n".join(
-        f"  {u.kind:<12} | {(u.subject or '—'):<8} | {u.amount:>5.2f} | {u.mode}"
+        f"  {u.kind:<12} | {(u.subject or '—'):<8} | {u.amount:>5.2f} | "
+        f"протухает {iso(u.expires_at) if u.expires_at else '—'}"
         for u in urges
     )
 
@@ -1237,7 +1245,13 @@ def _run_initiative() -> str:
     llm = _StubLLM(_INITIATIVE_SCRIPT, journal)
     edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
 
+    # Тишина замеряется ДО заходов, а не в возвращаемой строке. Первый
+    # набросок вычислял её в конце — то есть уже ПОСЛЕ того, как персонаж
+    # заговорил, — и печатал 0.00, потому что своя же реплика тишину и
+    # обнуляет. Артефакт при этом выглядел исправным: ноль там правда,
+    # только отвечает он на другой вопрос.
     sensed = cycle.sense_impulses(eng, INIT_NOW, _WEATHER_RAIN)
+    quiet = cycle.silence_urge(eng, INIT_NOW)
 
     said = cycle.background_tick(
         eng, edges, INIT_NOW, tz=TZ,
@@ -1255,7 +1269,9 @@ def _run_initiative() -> str:
     )
 
     return (
-        f"ПОЧУВСТВОВАЛ на {iso(INIT_NOW)}:\n{_render_urges(sensed)}\n"
+        f"СОБЫТИЯ на {iso(INIT_NOW)}:\n{_render_urges(sensed)}\n"
+        f"ТИШИНА (вычисляется, не хранится): {quiet:.2f} при пороге "
+        f"{cycle.IMPULSE_FLOOR}\n"
         f"{'=' * 60}\n"
         f"заход 1 (+30ч, тихо 30.2ч):  сказал = {said is not None}\n"
         f"заход 2 (+10 мин):           сказал = {soon is not None}   "

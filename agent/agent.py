@@ -3,6 +3,7 @@ import argparse
 import logging
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 
 import config
@@ -15,6 +16,20 @@ import timeutil
 from mind import summarize_session
 
 POLL_SECONDS = 5.0
+
+# Фон ходит РЕЖЕ реактивной ветки, и интервалы разведены намеренно (Шаг 37).
+#
+# Пять секунд — это про отзывчивость на реплику человека: он написал и ждёт.
+# У фона такого адресата нет. Молчание меряется часами, погода кэширована на
+# двадцать минут, событие «сменилось семейство» не протухает за минуту. Общий
+# интервал означал 17 280 заходов в сутки — каждый со своими запросами к
+# базе — ради решения, которое меняется дважды в день.
+#
+# Минута уменьшает это в двенадцать раз и не портит ничего: повод, замеченный
+# на минуту позже, остаётся тем же поводом. Величина отдельная, а не
+# `POLL_SECONDS * 12`, потому что связи между ними нет — они отвечают разным
+# вопросам, и разъезжаться им можно свободно.
+BACKGROUND_SECONDS = 60.0
 
 _STOP = False
 
@@ -144,6 +159,12 @@ def serve(eng, edges: cycle.Edges) -> None:
     logging.info("слушаю канал %s, пробуждение не реже %.0f с",
                  store_pg.CHANNEL_INBOX, POLL_SECONDS)
     drain(eng, edges)
+    # Часы фона МОНОТОННЫЕ, а не настенные: интервал здесь — «сколько
+    # прошло», а не «который час», и переводу времени или подкрутке NTP
+    # влиять на него нечем. Настенное время персонажа
+    # (`datetime.now(timezone.utc)`) живёт внутри самого захода, где оно и
+    # означает время.
+    next_background = time.monotonic()
     while not _STOP:
         for note in eng.conn.notifies(timeout=POLL_SECONDS, stop_after=1):
             logging.debug("уведомление: %s", note.channel)
@@ -152,7 +173,14 @@ def serve(eng, edges: cycle.Edges) -> None:
         drain(eng, edges)
         if _STOP:
             break
-        idle_tick(eng, edges)
+        if time.monotonic() >= next_background:
+            idle_tick(eng, edges)
+            # Отсчёт от МОМЕНТА ОКОНЧАНИЯ, а не от запланированного: заход, в
+            # котором персонаж заговорил, длится вызов модели, и отсчёт от
+            # плана дал бы следующий заход сразу же, догоняя расписание.
+            # Фону догонять нечего.
+            next_background = time.monotonic() + BACKGROUND_SECONDS
+
 
 def cmd_genesis(first_text: str, write: bool) -> int:
     """Сухой прогон рождения. Пишет только то, что печатает.

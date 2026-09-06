@@ -49,6 +49,9 @@ class PgEngine:
     def snapshot(self, now: datetime) -> Turn:
         return self._pg.build_snapshot(self.conn, now)
 
+    def outside_latch(self) -> dict:
+        return self._pg.outside_latch(self.conn)
+
     def place(self) -> dict:
         return self._pg.place(self.conn)
 
@@ -110,15 +113,18 @@ class PgEngine:
         return self._pg.utterances_since(self.conn, since)
 
     def record_urge(self, kind: str, subject, amount: float, now: datetime,
-                    mode: str = "bump", expires_at=None) -> None:
+                    expires_at=None) -> None:
         self._pg.record_urge(self.conn, kind, subject, amount, now,
-                             mode=mode, expires_at=expires_at)
+                             expires_at=expires_at)
 
     def strongest_impulse(self, now: datetime, floor: float):
         return self._pg.strongest_impulse(self.conn, now, floor)
 
-    def mark_spoken(self, impulse_id: int, now: datetime, damp: float) -> None:
-        self._pg.mark_spoken(self.conn, impulse_id, now, damp)
+    def mark_spoken(self, impulse_id: int, now: datetime) -> None:
+        self._pg.mark_spoken(self.conn, impulse_id, now)
+
+    def damp_impulses(self, factor: float) -> None:
+        self._pg.damp_impulses(self.conn, factor)
 
     def open_impulses(self) -> list[dict]:
         return self._pg.open_impulses(self.conn)
