@@ -1412,3 +1412,228 @@ def propose_names(birth, birthplace: str, client) -> list[dict]:
         logging.warning("genesis: имена не пришли: %s", err)
         return []
     return _parse_names(response.choices[0].message.content or "")
+
+
+# =============================================================================
+# Биограф (Шаг 38): сказанное о своей жизни становится жизнью
+# =============================================================================
+# **Достраивание идёт ПОСЛЕ ответа, а не до него, и это несущее решение.**
+#
+# Очевидный ход — заметить лакуну до ответа: спросили про братьев, памяти нет,
+# служебный проход сочиняет событие, персонаж читает его и отвечает. Так
+# делать нельзя по двум причинам, и вторая важнее первой.
+#
+# Первая: латентность. Биографический вопрос — самый частый в разговоре с
+# персонажем, и платить за каждый лишним вызовом до ответа значит поставить
+# паузу ровно там, где живость нужнее всего.
+#
+# Вторая: авторство. Если детство решает служебный проход, а персонаж его
+# зачитывает, биография принадлежит проходу. Получается анкета, заполненная
+# заранее, — то самое, чего избегает `genesis`, разделяя тягу и осмысление.
+#
+# Здесь наоборот: персонаж отвечает, как отвечает всегда — из характера,
+# настроения и того, что уже помнит, — а биограф достаёт из СКАЗАННОГО
+# событие и записывает навсегда. Импровизация становится каноном. Записанное
+# не может противоречить ответу, потому что оно и ЕСТЬ ответ.
+#
+# Цена — одно: между репликой и записью есть щель. Ответ уже отдан, а канон
+# ещё не пополнен, и если T2 упадёт, сказанное останется несказанным. Та же
+# щель, что у настроения и ассершенов, и лечится она тем же — повтором T2, а
+# не переносом работы в T1.
+
+# Сколько событий берём с одного обмена. Одно — не скупость: человек за
+# реплику рассказывает одну историю, а модель, которой разрешили несколько,
+# начинает дробить её на «эпизоды» и добивать список до числа.
+MEMORIES_PER_EXCHANGE = 1
+
+# Вердикты сверки. Три, потому что вопросов к кандидату тоже три, и слить их
+# в «да/нет» значило бы потерять причину отказа — а причины требуют разного:
+# противоречие правится промптом, повтор безобиден и ожидаем.
+VERDICT_WRITE = "записать"
+VERDICT_CONTRADICTS = "противоречит"
+VERDICT_KNOWN = "уже есть"
+VERDICTS = (VERDICT_WRITE, VERDICT_CONTRADICTS, VERDICT_KNOWN)
+
+
+def _render_canon(memories: list[dict] | None, born: datetime | None) -> str:
+    """Уже записанное — для биографа и для сверки.
+
+    Отличается от `_render_memories` тем, что здесь НЕ отбор: сверять надо со
+    всем, что записано, а не с тремя всплывшими. Три всплывших — это то, что
+    персонаж вспомнил; противоречить он может и тому, чего сейчас не вспомнил.
+    """
+    if not memories:
+        return "(пока ничего не записано)"
+    lines = []
+    for m in sorted(memories, key=lambda x: x.get("happened_at") or ""):
+        text = (m.get("text") or "").strip()
+        if text:
+            lines.append(f"- [{_memory_when(m, born)}] {text}")
+    return "\n".join(lines) if lines else "(пока ничего не записано)"
+
+
+def _build_biographer_prompt(turn: Turn, user_text: str, answer: str,
+                             canon: list[dict], born: datetime | None,
+                             age_now: int | None) -> str:
+    return (
+        "Ты - служебный проход биограф. Задача: посмотреть, не рассказал ли "
+        "персонаж о СОБЫТИИ из своей жизни, и записать его.\n\n"
+
+        # `_years_word`, а не «лет»: третий читатель того же согласования.
+        # «Ему 32 лет» в промпте служебного прохода — та же небрежность, что
+        # в реплике персонажа, и модель, читающая кривой русский, отвечает
+        # кривым русским.
+        f"Персонажа зовут {turn.name}. Ему {age_now} {_years_word(age_now)}.\n\n"
+
+        "Что уже записано о его жизни:\n"
+        f"{_render_canon(canon, born)}\n\n"
+
+        f"Собеседник: {clip_text(user_text)}\n"
+        f"{turn.name}: {clip_text(answer)}\n\n"
+
+        "Что считается событием:\n"
+        " - случай, у которого есть время и место в его жизни: «в первом "
+        "классе месяц ходил с чужим ранцем»;\n"
+        " - НЕ черта и НЕ привычка: «люблю кофе», «я неразговорчивый» - это "
+        "не события, их записывает другой проход;\n"
+        " - НЕ то, что случилось с собеседником или с третьими лицами;\n"
+        " - НЕ сегодняшний разговор: он и так записывается.\n\n"
+
+        "Если события нет - верни пустой список. Это обычный исход, и он "
+        "лучше, чем натянутое событие.\n\n"
+
+        "Формат - ТОЛЬКО JSON-массив, без пояснений:\n"
+        '[{"age": 7, "precision": "year", "text": "..."}]\n\n'
+
+        "Про поля:\n"
+        " - age: сколько ему было ЛЕТ, когда это случилось. Целое число от 0 "
+        f"до {age_now}. Не дата: он помнит возраст, а не число календаря.\n"
+        " - precision: насколько точно это датируется. 'era' - детство, "
+        "юность, «когда-то давно». 'year' - помнит год или класс. 'month' - "
+        "помнит время года. 'day' - помнит конкретный день, и таких "
+        "воспоминаний мало.\n"
+        " - text: одна сцена, от первого лица, 1-2 фразы. Не сводка периода.\n\n"
+
+        "Не больше одного события. Если рассказано несколько - возьми то, "
+        "которое он рассказал подробнее."
+    )
+
+
+def _build_gate_prompt(candidate: dict, canon: list[dict],
+                       born: datetime | None) -> str:
+    return (
+        "Ты - служебный проход сверка. Задача: решить, можно ли добавить "
+        "новое воспоминание к уже записанной биографии.\n\n"
+
+        "Уже записано:\n"
+        f"{_render_canon(canon, born)}\n\n"
+
+        f"Кандидат:\n- [{_memory_when(candidate, born)}] "
+        f"{(candidate.get('text') or '').strip()}\n\n"
+
+        "Ответь ОДНИМ словом:\n"
+        f" {VERDICT_WRITE} - не противоречит записанному и добавляет новое;\n"
+        f" {VERDICT_CONTRADICTS} - не может быть правдой одновременно с чем-то "
+        "записанным (единственный ребёнок и старший брат; переехал в семь и "
+        "жил там до двадцати);\n"
+        f" {VERDICT_KNOWN} - об этом уже записано, пусть другими словами.\n\n"
+
+        "Сомневаешься между «записать» и «противоречит» - выбирай "
+        "«противоречит». Незаписанное воспоминание персонаж сочинит заново, "
+        "записанное противоречие останется навсегда."
+    )
+
+
+def extract_memories(turn: Turn, user_text: str, answer: str, client,
+                     canon: list[dict], born: datetime | None,
+                     age_now: int | None) -> list[dict]:
+    """Событие из жизни, рассказанное в ответе. Нет — пустой список.
+
+    Пустой список — обычный исход: большинство обменов не про биографию.
+    """
+    if born is None or age_now is None:
+        # Не родился — записывать некуда: у события нет оси, на которую лечь.
+        return []
+    prompt = _build_biographer_prompt(turn, user_text, answer, canon, born, age_now)
+    try:
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL_LIGHT,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+    except OpenAIError as err:
+        logging.warning("биограф: запрос упал: %s", err)
+        return []
+    return _parse_biographer_output(
+        response.choices[0].message.content or "", age_now)
+
+
+def check_memory(candidate: dict, canon: list[dict], born: datetime | None,
+                 client) -> str:
+    """Вердикт сверки. Сбой — `VERDICT_CONTRADICTS`, то есть НЕ записать.
+
+    Отказ по умолчанию, а не разрешение: несработавшая сверка не должна
+    открывать ворота. Цена ошибки несимметрична — незаписанное воспоминание
+    персонаж сочинит заново при следующем вопросе, а записанное противоречие
+    останется в биографии навсегда, потому что воспоминания не переписываются.
+    """
+    if not canon:
+        # Первому противоречить нечему, и спрашивать не о чем. Экономия здесь
+        # не про деньги: на пустом каноне сверка ответила бы наугад.
+        return VERDICT_WRITE
+    try:
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL_LIGHT,
+            messages=[{"role": "user",
+                       "content": _build_gate_prompt(candidate, canon, born)}],
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+    except OpenAIError as err:
+        logging.warning("сверка: запрос упал: %s — не записываю", err)
+        return VERDICT_CONTRADICTS
+
+    word = " ".join((response.choices[0].message.content or "").split()).lower()
+    for verdict in VERDICTS:
+        if verdict in word:
+            return verdict
+    logging.warning("сверка: непонятный вердикт %r — не записываю", word[:80])
+    return VERDICT_CONTRADICTS
+
+
+def _parse_biographer_output(row: str, age_now: int) -> list[dict]:
+    """Разбор выдачи биографа. Всё сомнительное отбрасывается молча в лог.
+
+    Возраст проверяется здесь, а не доверяется модели: `age` вне [0, age_now]
+    означает событие до рождения или из будущего, и записать такое значит
+    сломать ось жизни необратимо.
+    """
+    try:
+        data = json.loads(_strip_fences(row))
+    except json.JSONDecodeError:
+        logging.warning("биограф: невалидный JSON %s", row[:200])
+        return []
+    if not isinstance(data, list):
+        logging.warning("биограф: ожидается list, пришло %s", type(data).__name__)
+        return []
+
+    out = []
+    for item in data[:MEMORIES_PER_EXCHANGE]:
+        if not isinstance(item, dict):
+            continue
+        text = " ".join((item.get("text") or "").split())
+        if not text:
+            continue
+        try:
+            age = int(item.get("age"))
+        except (TypeError, ValueError):
+            logging.warning("биограф: возраст не число: %r", item.get("age"))
+            continue
+        if not 0 <= age <= age_now:
+            logging.warning("биограф: возраст %s вне [0, %s] — отброшено",
+                            age, age_now)
+            continue
+        precision = item.get("precision")
+        if precision not in ("day", "month", "year", "era"):
+            precision = "era"
+        out.append({"age": age, "precision": precision, "text": text})
+    return out

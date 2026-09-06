@@ -10,11 +10,13 @@ import config
 import genesis
 import outside
 import sky as sky_mod
+import timeutil
 import web
-from mind import (build_system_prompt, decide_query, extract_objects,
+from mind import (VERDICT_WRITE, build_system_prompt, check_memory,
+                  decide_query, extract_memories, extract_objects,
                   propose_birthplaces, propose_names, reflect_mood,
                   reflect_self, speak_first, weather_family)
-from snapshot import SESSION_GAP_HOURS
+from snapshot import SESSION_GAP_HOURS, iso
 from openai import OpenAI, OpenAIError
 
 NET_TIMEOUT = 10.0
@@ -240,6 +242,8 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
         candidates = list(extract_objects(
             turn, pair["user_text"], pair["answer"], edges.llm, findings))
         logging.info("digest extract_objects: %.1fs", time.monotonic() - t)
+        remembered = _biograph(eng, edges, turn, pair, now)
+        logging.info("digest биограф: %.1fs", time.monotonic() - t)
         with eng.unit():
             if new_mood:
                 eng.set_mood(new_mood)
@@ -247,11 +251,48 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
                 eng.merge_self_assertions(new_assertions, now)
             for cand in candidates:
                 eng.upsert_object(cand, now)
+            for happened_at, precision, text in remembered:
+                eng.add_memory(happened_at, precision, text, "told")
             eng.mark_digest_done(job["id"], now)
         return True
     except Exception as err:
         logging.warning("digest_one: %s — повторю на следующем круге", err)
         return False
+
+
+def _biograph(eng, edges: Edges, turn, pair: dict, now: datetime) -> list[tuple]:
+    """Биограф плюс сверка. Возвращает готовое к записи, ничего не пишет сам.
+
+    Не пишет намеренно: запись T2 идёт одной транзакцией в `digest_one`, и
+    воспоминание обязано лечь вместе с настроением и объектами, а не отдельно.
+    Иначе при падении между ними разговор оставил бы след в биографии, но не
+    в памяти об объектах — то есть состояния, которого не бывает после
+    успешного хода.
+
+    Возраст в дату переводит КОД, а не модель. Модель называет, сколько ему
+    было лет, — так человек и помнит, — а календарную метку считает тот, у
+    кого есть `born_at`. Спроси мы у модели дату, она выдала бы правдоподобное
+    число дня и месяца для события, которое датируется в лучшем случае годом,
+    и `precision` осталось бы стоять при фальшивой точности.
+    """
+    born = timeutil.parse_ts(turn.born_at or "")
+    age_now = timeutil.age_years(born, now)
+    if born is None or age_now is None:
+        return []
+
+    canon = eng.all_memories()
+    found = extract_memories(turn, pair["user_text"], pair["answer"],
+                             edges.llm, canon, born, age_now)
+    out = []
+    for cand in found:
+        happened_at = born + timedelta(days=cand["age"] * timeutil.DAYS_IN_YEAR)
+        verdict = check_memory(
+            {**cand, "happened_at": iso(happened_at)}, canon, born, edges.llm)
+        logging.info("сверка (%s лет, %s): %s — %s",
+                     cand["age"], cand["precision"], verdict, cand["text"][:60])
+        if verdict == VERDICT_WRITE:
+            out.append((happened_at, cand["precision"], cand["text"]))
+    return out
 
 # =============================================================================
 # Фоновый ход (Шаг 35): персонаж заговаривает сам

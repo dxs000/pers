@@ -49,6 +49,15 @@ class PgEngine:
     def snapshot(self, now: datetime) -> Turn:
         return self._pg.build_snapshot(self.conn, now)
 
+    # --- Биография (Шаг 38) --------------------------------------------------
+    def all_memories(self) -> list[dict]:
+        return self._pg.all_memories(self.conn)
+
+    def add_memory(self, happened_at, precision: str, text: str, source: str,
+                   weight: float = 1.0) -> int:
+        return self._pg.add_memory(self.conn, happened_at, precision, text,
+                                   source, weight)
+
     def outside_latch(self) -> dict:
         return self._pg.outside_latch(self.conn)
 

@@ -308,6 +308,57 @@ def load_fixture(conn, state: dict) -> None:
         _fill_fixture(conn, state)
 
 
+def all_memories(conn) -> list[dict]:
+    """ВСЁ записанное, в порядке жизни. Для биографа и сверки (Шаг 38).
+
+    Отличается от среза в `build_snapshot` тем, что здесь нет `LIMIT`, и это
+    существенно. Снимок отдаёт то, что персонаж СЕЙЧАС вспомнил, — три штуки,
+    отобранные по весу. Сверять кандидата надо со всем: противоречить он
+    может и тому, чего персонаж в эту минуту не вспомнил, а забытое
+    противоречие остаётся противоречием.
+
+    Предела нет намеренно и до поры. Пока биография — десятки строк, весь
+    канон влезает в промпт сверки. Когда их станут сотни, понадобится отбор
+    релевантного — и это будет тот же вопрос, что у `build_snapshot`, только
+    с другой ценой ошибки: там пропущенное воспоминание просто не всплыло,
+    здесь пропущенное даёт записанное противоречие.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, happened_at, precision, text, source, weight
+          FROM memories ORDER BY happened_at, id
+        """
+    ).fetchall()
+    return [
+        {"id": r["id"], "happened_at": iso(r["happened_at"]),
+         "precision": r["precision"], "text": r["text"],
+         "source": r["source"], "weight": float(r["weight"])}
+        for r in rows
+    ]
+
+
+def add_memory(conn, happened_at, precision: str, text: str, source: str,
+               weight: float = 1.0) -> int:
+    """Записать воспоминание. Только INSERT — переписывания не бывает.
+
+    Неизменяемость здесь не осторожность, а единственное, что отличает
+    биографию от потока галлюцинаций (см. `0003_life.sql`): модель без
+    состояния при каждом вопросе «расскажи о детстве» сочиняет новое детство,
+    и только уже записанное не даёт ей это сделать дважды.
+
+    Отсюда же отсутствие `ON CONFLICT`: сливать воспоминания не по чему.
+    Повтор — не конфликт ключа, а вопрос смысла, и отвечает на него сверка
+    (`mind.check_memory`) до вызова, а не база после.
+    """
+    return conn.execute(
+        """
+        INSERT INTO memories (happened_at, precision, text, source, weight)
+        VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """,
+        (happened_at, precision, text.strip(), source, weight),
+    ).fetchone()["id"]
+
+
 def _fill_fixture(conn, state: dict) -> None:
     """Тело заливки. Зовётся только из `load_fixture`, всегда под границей."""
     self = state.get("self", {})
