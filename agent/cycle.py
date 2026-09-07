@@ -13,9 +13,9 @@ import sky as sky_mod
 import timeutil
 import web
 from mind import (VERDICT_WRITE, build_system_prompt, check_memory,
-                  decide_query, extract_memories, extract_objects,
-                  propose_birthplaces, propose_names, reflect_mood,
-                  reflect_self, speak_first, weather_family)
+                  decide_query, dream, dream_subject, extract_memories,
+                  extract_objects, propose_birthplaces, propose_names,
+                  reflect_mood, reflect_self, speak_first, weather_family)
 from snapshot import SESSION_GAP_HOURS, iso
 from openai import OpenAI, OpenAIError
 
@@ -79,16 +79,21 @@ def prompt_and_latch(eng, edges: Edges, now_dt: datetime, previous=None,
     place = eng.place()
     snap = sky_mod.local_snapshot(place.get("lat"), place.get("lon"), now_dt, tz)
     wx = weather_snapshot(place, edges, now_dt)
+    turn = eng.snapshot(now_dt)
     prompt = build_system_prompt(
-        eng.snapshot(now_dt),
+        turn,
         now_dt.astimezone(tz),
         snap,
         wx,
         previous,
         findings,
     )
+    # Вспоминание отмечается ЗДЕСЬ, потому что здесь снимок стал промптом
+    # (Шаг 40). Единица уже открыта под латч среды, и второй не заводится:
+    # обе записи — след одного и того же прочтения памяти.
     with eng.unit():
         eng.remember_outside(snap, wx, now_dt, weather_family(wx))
+        eng.touch_recall(turn.memories, now_dt)
     return prompt
 
 
@@ -477,8 +482,9 @@ def background_tick(eng, edges: Edges, now: datetime, *,
     if not impulse:
         return None
 
+    turn = eng.snapshot(now)
     text = speak_first(
-        eng.snapshot(now), impulse, edges.llm,
+        turn, impulse, edges.llm,
         memory=eng.working_memory(),
         now=now.astimezone(tz), sky=snap, weather=wx,
         last_exchange=eng.last_exchange(),
@@ -498,12 +504,131 @@ def background_tick(eng, edges: Edges, now: datetime, *,
         # `append_utterance` сдвинул `last_utterance`.
         eng.damp_impulses(IMPULSE_DAMP)
         eng.remember_outside(snap, wx, now, weather_family(wx))
+        # Вспомненное отмечается только когда персонаж ЗАГОВОРИЛ, а не когда
+        # промпт собрался. Промолчавшая модель прочла память и ничего с ней
+        # не сделала — считать это вспоминанием значило бы, что вес растёт от
+        # неудачных попыток. Расхождение с `prompt_and_latch` намеренное: там
+        # реплика уже отдана к моменту записи, здесь ещё нет.
+        eng.touch_recall(turn.memories, now)
 
     logging.info("заговорил сам (%s, urge %.2f): %s",
                  impulse["kind"], impulse["urge"], text[:60])
     if announce is not None:
         announce(text)
     return text
+
+
+# =============================================================================
+# Сон (Шаг 40): биография растёт без собеседника
+# =============================================================================
+# **Отдельный заход, а не ветка `background_tick`.** Дела разные: фоновый
+# заход решает «говорить или молчать», сон решает «записать». Слитые в один,
+# они дали бы молчаливому заходу цену вызова модели — а молчаливых заходов
+# подавляющее большинство, и весь Шаг 37 был про то, чтобы они были дешёвыми.
+#
+# **Ночь считается по ЕГО месту, а не по часам сервера и не по времени
+# собеседника.** Персонаж живёт там, где живёт (`place_lat`/`place_lon`), и
+# небо ему считает та же офлайновая арифметика, что рисует «за окном». Без
+# места ночи нет — сон выключается, как выключается блок среды. Деградация,
+# а не отказ: то же правило, что у `sky` и `web`.
+#
+# Заслонок три, и они не те же, что у инициативы, хотя выглядят похоже:
+#   ночь        — сон не бывает днём, и это не эстетика: днём он превратился
+#                 бы в фоновый генератор биографии, работающий, пока человек
+#                 разговаривает;
+#   тишина      — если собеседник рядом, персонаж не спит. Порог короткий:
+#                 час без реплик — уже не разговор;
+#   раз в сутки — сон необратим и пишется в таблицу, которая не
+#                 переписывается. Две ночи подряд за одну ночь — не «много
+#                 снов», а вдвое быстрее исписанное детство.
+NIGHT_LIGHTS = frozenset({sky_mod.LIGHT_NAUTICAL, sky_mod.LIGHT_ASTRONOMICAL,
+                          sky_mod.LIGHT_NIGHT})
+
+# Гражданские сумерки в NIGHT_LIGHTS НЕ входят намеренно. В высоких широтах
+# летом темнее гражданских не становится вовсе, и включи мы их — сон пришёлся
+# бы на светлый вечер. Пусть лучше в белые ночи ему не снится ничего: пропуск
+# заметен и честен, а сон в девять вечера выглядит поломкой.
+
+DREAM_QUIET_HOURS = 1.0      # столько никто не пишет — считаем, что он один
+DREAM_INTERVAL_HOURS = 20.0  # не чаще; сутки минус запас на сдвиг ночи
+DREAM_WEIGHT = 1.6           # свежий сон всплывает в промпте сам, без правок
+DREAM_URGE = 1.5             # выше порога сразу: сон — крупный повод
+DREAM_TTL_HOURS = 14.0       # к вечеру рассказывать уже нечего
+
+
+def dream_tick(eng, edges: Edges, now: datetime, *, tz=None) -> str | None:
+    """Одна ночь: увидеть сон и записать его. Возвращает сон или `None`.
+
+    `None` — обычный исход, как и у фонового захода: почти всегда сейчас не
+    ночь, или он не один, или уже снилось.
+
+    **Пишет, но не говорит.** Заведённый импульс подхватит `background_tick`
+    своим чередом — может быть, через час, может быть, утром. Сказать сразу
+    было бы соблазнительно и неверно: тогда сон существовал бы ради реплики,
+    а он существует сам по себе. Ночная реплика при этом возможна, и это
+    оставлено сознательно — человек спит и увидит её утром, а от навязчивости
+    держат пауза и бюджет суток, те же, что у всех прочих поводов.
+    """
+    tz = tz or config.TZ
+    place = eng.place()
+    snap = sky_mod.local_snapshot(place.get("lat"), place.get("lon"), now, tz)
+    if snap is None or snap.get("light") not in NIGHT_LIGHTS:
+        return None
+
+    stamps = [t for t in (eng.last_exchange(), eng.last_utterance()) if t]
+    if stamps:
+        idle = (now - max(stamps)).total_seconds() / 3600.0
+        if 0.0 <= idle < DREAM_QUIET_HOURS:
+            return None
+
+    slept = eng.last_dream_at()
+    if slept is not None:
+        hours = (now - slept).total_seconds() / 3600.0
+        if 0.0 <= hours < DREAM_INTERVAL_HOURS:
+            return None
+
+    # Снимок и канон спрашиваются ПОСЛЕ заслонок, как модель в
+    # `background_tick`: до них доходит один заход из многих сотен.
+    turn = eng.snapshot(now)
+    born = timeutil.parse_ts(turn.born_at or "")
+    age_now = timeutil.age_years(born, now)
+    if born is None or age_now is None:
+        return None
+
+    canon = eng.all_memories()
+    seen = dream(turn, canon, born, age_now, edges.llm, now=now.astimezone(tz))
+    if not seen:
+        return None
+
+    # Вспомненное проходит ТЕ ЖЕ ворота, что кандидат биографа. Ворота одни на
+    # обоих писателей — два разных правила «что считать противоречием»
+    # разъехались бы, и разъехались бы молча.
+    recalled = seen.get("recalled")
+    verdict = None
+    happened_at = None
+    if recalled:
+        happened_at = born + timedelta(
+            days=recalled["age"] * timeutil.DAYS_IN_YEAR)
+        verdict = check_memory(
+            {**recalled, "happened_at": iso(happened_at)}, canon, born,
+            edges.llm)
+        logging.info("сон, сверка (%s лет, %s): %s — %s",
+                     recalled["age"], recalled["precision"], verdict,
+                     recalled["text"][:60])
+
+    with eng.unit():
+        # Сон датируется сегодняшней ночью и точностью до дня: он и правда
+        # случился в этот день, и это единственное воспоминание, у которого
+        # дата известна безусловно.
+        eng.add_memory(now, "day", seen["dream"], "dream", DREAM_WEIGHT)
+        if recalled and verdict == VERDICT_WRITE:
+            eng.add_memory(happened_at, recalled["precision"],
+                           recalled["text"], "inferred")
+        eng.record_urge("dream", dream_subject(seen["dream"]), DREAM_URGE, now,
+                        now + timedelta(hours=DREAM_TTL_HOURS))
+
+    logging.info("приснилось: %s", seen["dream"][:80])
+    return seen["dream"]
 
 
 # =============================================================================

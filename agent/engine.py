@@ -58,6 +58,13 @@ class PgEngine:
         return self._pg.add_memory(self.conn, happened_at, precision, text,
                                    source, weight)
 
+    # --- Сон и вспоминание (Шаг 40) -----------------------------------------
+    def touch_recall(self, memories, now: datetime) -> None:
+        self._pg.touch_recall(self.conn, memories, now)
+
+    def last_dream_at(self):
+        return self._pg.last_dream_at(self.conn)
+
     def record_birth(self, name: str, born_at, birthplace: str | None,
                      reason: str) -> bool:
         return self._pg.record_birth(self.conn, name, born_at, birthplace, reason)

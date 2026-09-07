@@ -121,9 +121,6 @@ BIRTHPLACE_COUNT = 8
 NAMES_COUNT = 20
 GENESIS_GENDER = "мальчику"
 
-NAME_CHAR_LIMIT = 40
-REASON_CHAR_LIMIT = 200
-
 
 def build_system_prompt(
     turn: Turn,
@@ -906,6 +903,27 @@ def _memory_when(m: dict, born: datetime | None) -> str:
     return f"тебе было {age}"
 
 
+# Происхождение воспоминания — словом, и только там, где оно меняет смысл
+# строки. Пометка ровно одна, и это не начало таблицы кодов (`told`,
+# `inferred`, `genesis` в промпте неотличимы и различаться не должны:
+# рассказанное и выведенное персонаж помнит одинаково).
+#
+# Сон отличается тем, что он единственный НЕ БЫЛ. Без пометки приснившееся
+# ложится в тот же список, что прожитое, и различить их персонажу нечем — то
+# есть биография начинает врать ровно на том писателе, ради которого Шаг 40 и
+# делается. Ошибка при этом накапливающаяся: сон, принятый за событие,
+# доедет до биографа следующим разговором и станет каноном уже как явь.
+#
+# Дата у сна при этом честная — ночь, когда он приснился, — и потому
+# `_memory_when` для него не трогается: «сегодня» плюс «(снилось)» читаются
+# вместе и означают ровно то, что произошло.
+MEMORY_MARKS = {"dream": "(снилось) "}
+
+
+def _memory_mark(m: dict) -> str:
+    return MEMORY_MARKS.get(m.get("source") or "", "")
+
+
 def _render_memories(memories: list[dict] | None, born: datetime | None) -> str | None:
     """Блок воспоминаний. Порядок — по жизни, а не по весу.
 
@@ -931,7 +949,7 @@ def _render_memories(memories: list[dict] | None, born: datetime | None) -> str 
         text = (m.get("text") or "").strip()
         if not text:
             continue
-        lines.append(f"- [{_memory_when(m, born)}] {text}")
+        lines.append(f"- [{_memory_when(m, born)}] {_memory_mark(m)}{text}")
     return "\n".join(lines) if lines else None
 
 
@@ -1332,47 +1350,6 @@ def _parse_places(row: str) -> list[str]:
         out.append(label)
     return out
 
-def _parse_names(row: str) -> list[dict]:
-    """Строки «имя | причина» -> список. Битая строка пропускается, а не роняет.
-
-    Формат строчный, а не JSON, и это осознанно: двадцать объектов JSON модель
-    обрывает на середине заметно чаще, а обрыв уносит ВЕСЬ ответ - последняя
-    скобка не закрылась, разбор упал, генезиса нет. Строчный формат
-    деградирует по одной записи: испортилась третья - остаются девятнадцать,
-    и тянуть есть из чего.
-    """
-    out = []
-    seen = set()
-    for line in _strip_fences(row).splitlines():
-        line = line.strip().lstrip("-•*").strip()
-        if "|" not in line:
-            continue
-        name, _, reason = line.partition("|")
-        name = " ".join(name.split()).strip(".,;:")
-        reason = " ".join(reason.split())
-        if not name or not reason or len(name) > NAME_CHAR_LIMIT:
-            continue
-        key = name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append({"name": name, "reason": clip_text(reason, REASON_CHAR_LIMIT)})
-    return out
-
-
-def _parse_places(row: str) -> list[str]:
-    """Названия по строке. Тот же разбор, только без второй половины."""
-    out, seen = [], set()
-    for line in _strip_fences(row).splitlines():
-        label = " ".join(line.strip().lstrip("-•*0123456789.").split()).strip(".,;:")
-        if not label or len(label) > NAME_CHAR_LIMIT:
-            continue
-        if label.lower() in seen:
-            continue
-        seen.add(label.lower())
-        out.append(label)
-    return out
-
 def propose_birthplaces(from_label: str, birth, client) -> list[str]:
     """Список населённых пунктов в стороне тяги. Неудача -> пусто."""
     try:
@@ -1455,7 +1432,7 @@ def _render_canon(memories: list[dict] | None, born: datetime | None) -> str:
     for m in sorted(memories, key=lambda x: x.get("happened_at") or ""):
         text = (m.get("text") or "").strip()
         if text:
-            lines.append(f"- [{_memory_when(m, born)}] {text}")
+            lines.append(f"- [{_memory_when(m, born)}] {_memory_mark(m)}{text}")
     return "\n".join(lines) if lines else "(пока ничего не записано)"
 
 
@@ -1624,3 +1601,220 @@ def _parse_biographer_output(row: str, age_now: int) -> list[dict]:
             precision = "era"
         out.append({"age": age, "precision": precision, "text": text})
     return out
+
+
+# =============================================================================
+# Сон (Шаг 40): у биографии появляется писатель, которому собеседник не нужен
+# =============================================================================
+# **Сон пишет, а не говорит, и это несущее решение.** Соблазн — сделать сон
+# просто ещё одним поводом заговорить: приснилось, завёлся импульс, утром
+# рассказал. Так было бы дешевле на одну запись и бесполезно ровно в том, ради
+# чего шаг делается: сказанное и забытое — не биография.
+#
+# Отсюда порядок: сначала запись, потом (может быть) реплика. Импульс
+# `dream` заводится ПОСЛЕ того, как сон лёг в `memories`, и рассказывает
+# персонаж не то, что ему подсунули поводом, а то, что у него уже записано.
+# Если он до утра промолчит, сон всё равно останется частью его жизни.
+#
+# **Проход выдаёт ДВА разных объекта, и путать их нельзя.**
+#
+#   `dream`    — сцена сегодняшней ночи. Событие, случившееся СЕЙЧАС, и
+#                датируется оно сегодняшним числом. Источник `dream`, и в
+#                промпте он помечен словом (`MEMORY_MARKS`): приснившееся
+#                обязано отличаться от бывшего, иначе биография начинает
+#                врать на своём же писателе.
+#
+#   `recalled` — то, что сон ЗАДЕЛ в прошлом и чего в каноне ещё нет. Это уже
+#                не сон, а настоящее событие его жизни, о котором сон
+#                напомнил, — и потому источник у него `inferred` («вывел сам,
+#                вспоминая», `0003_life.sql`), а не `dream`. Схема различала
+#                эти два источника с самого начала; здесь различение впервые
+#                работает.
+#
+# Второе и есть то, ради чего всё: биография прирастает прошлым без единого
+# вопроса собеседника. Цена — риск, и он ровно тот же, что у биографа:
+# записанное противоречие остаётся навсегда. Поэтому `recalled` идёт через ТУ
+# ЖЕ `check_memory` без единой правки. Ворота одни на обоих писателей, и это
+# не экономия: два разных правила «что считать противоречием» разъехались бы,
+# и разъехались бы молча.
+#
+# **Модель берётся полная, а не лёгкая.** Все служебные проходы ходят в
+# `DEEPSEEK_MODEL_LIGHT`, и сон выглядит служебным по форме — JSON, разбор,
+# отбрасывание мусора. По существу он другой: остальные проходы ИЗВЛЕКАЮТ
+# из уже сказанного, а этот сочиняет, и сочиняет то, что останется навсегда.
+# Дешёвая модель на такой работе даёт пересказ дня с переставленными словами —
+# проверено на первом же прогоне и стоило одной ночи персонажа.
+
+# Длиннее реплики (`UTTERANCE_CHAR_LIMIT`), короче ответа: сон — сцена, а не
+# рассказ о сцене, и три-четыре фразы её исчерпывают. Предел здесь не про
+# бюджет, а про форму: сну, которому дали место, модель дописывает разгадку.
+DREAM_CHAR_LIMIT = 400
+
+# Сколько сна уезжает в `impulses.subject`. Не для красоты: `subject` входит
+# в уникальный индекс открытых поводов, и два разных сна обязаны быть двумя
+# разными новостями — как «начался дождь» и «пошёл снег» (`0002_initiative`).
+DREAM_SUBJECT_LIMIT = 60
+
+
+def dream_subject(text: str) -> str:
+    return clip_text(" ".join((text or "").split()), DREAM_SUBJECT_LIMIT)
+
+
+def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
+                        age_now: int | None, now=None) -> str:
+    """Промпт сна. Дневной остаток обязателен, и он тут не для колорита.
+
+    Сон без входа — генератор случайного: модель, которой дали только имя и
+    возраст, выдаёт архетипы (падение, погоня, экзамен), и они одинаковы у
+    любого персонажа. Вход делает сон СЛЕДСТВИЕМ жизни: канон даёт материал,
+    эпизоды и объекты — то, чем голова занята последние дни.
+
+    Черт характера здесь нет намеренно. Они уехали бы в промпт указанием, каким
+    сон должен получиться («ты ироничный — приснись иронично»), а сон тем и
+    отличается от реплики, что характер в нём не распоряжается.
+    """
+    who = f"Персонажа зовут {turn.name}."
+    if age_now is not None:
+        who += f" Ему {age_now} {timeutil.years_word(age_now)}."
+    if turn.birthplace:
+        who += f" Родом из {turn.birthplace}."
+
+    parts = [
+        "Ты - служебный проход сон. Задача: увидеть, что снится персонажу "
+        "этой ночью, и записать это.\n",
+        who,
+        f"К ночи его настроение - {turn.mood}.\n",
+        "Вся его жизнь, как она записана:",
+        _render_canon(canon, born) + "\n",
+    ]
+
+    picked = _pick_assertions(turn.self_assertions, SELF_ASSERTION_LIMIT)
+    if picked:
+        parts.append("Что он знает о себе:\n"
+                     + "\n".join(f"- {a['key']}: {a['value']}" for a in picked)
+                     + "\n")
+
+    # Дневной остаток. Эпизоды и объекты уже отобраны хранилищем, и отбирать
+    # их заново под сон было бы вторым правилом отбора той же памяти.
+    residue = []
+    episodes_block = _render_episodes(turn.episodes, now)
+    if episodes_block:
+        residue.append(episodes_block)
+    if turn.objects:
+        residue.append("\n".join(f"- {_render_object(o, now)}"
+                                 for o in turn.objects))
+    if residue:
+        parts.append("Дневной остаток - чем была занята голова:\n"
+                     + "\n".join(residue) + "\n")
+
+    parts.append(
+        "Сон - НЕ пересказ дня и НЕ пересказ записанного. Он берёт оттуда "
+        "материал и обходится с ним, как обходятся сны: смещает, путает, "
+        "ставит рядом то, что рядом не стояло, и ничего не объясняет.\n"
+    )
+
+    parts.append(
+        "Формат - ТОЛЬКО JSON, без пояснений:\n"
+        '{"dream": "...", "recalled": {"age": 9, "precision": "era", '
+        '"text": "..."}}\n'
+    )
+
+    parts.append(
+        "Про поля:\n"
+        " - dream: что приснилось. От первого лица, настоящее время, 2-3 "
+        "фразы. Без «мне снилось, что» - это и так сон. Без морали и без "
+        "разгадки в конце.\n"
+        " - recalled: настоящее событие его жизни, которое сон задел и "
+        "которого в записанном выше ЕЩЁ НЕТ. Не пересказ сна: сон уже "
+        "записан полем выше. Поля те же, что у биографа: age - сколько ему "
+        f"было лет (целое от 0 до {age_now}); precision - 'era', 'year', "
+        "'month' или 'day'; text - одна сцена, от первого лица, 1-2 фразы.\n"
+        " - recalled может быть null, и это обычный исход. Ночь, в которую "
+        "ничего не вспомнилось, - обычная ночь.\n"
+    )
+
+    parts.append(
+        "Пустое поле лучше выдуманного: то, что ты запишешь в recalled, "
+        "останется в его жизни навсегда и переписано не будет. Оно не "
+        "должно противоречить ничему из записанного выше."
+    )
+    return "\n".join(parts)
+
+
+def _parse_dream_output(row: str, age_now: int | None) -> dict | None:
+    """Разбор выдачи сна. Нет сна — `None`, нет `recalled` — сон без него.
+
+    Сон и вспомненное разбираются НЕЗАВИСИМО, и это правило, а не удобство:
+    испорченный `recalled` не должен уносить сон целиком. Порча тут ожидаема
+    именно во втором поле — оно вложенное, с тремя ключами и числом, — а
+    первое портится разве что вместе со всем ответом.
+
+    Возраст проверяется здесь, а не доверяется модели, ровно как у биографа:
+    `age` вне [0, age_now] означает событие до рождения или из будущего, и
+    записать такое значит сломать ось жизни необратимо.
+    """
+    try:
+        data = json.loads(_strip_fences(row))
+    except json.JSONDecodeError:
+        logging.warning("сон: невалидный JSON %s", row[:200])
+        return None
+    if not isinstance(data, dict):
+        logging.warning("сон: ожидается object, пришло %s", type(data).__name__)
+        return None
+
+    text = " ".join((data.get("dream") or "").split())
+    if not text:
+        logging.info("сон: пусто — эту ночь ничего не снилось")
+        return None
+    text = clip_text(text, DREAM_CHAR_LIMIT)
+
+    recalled = data.get("recalled")
+    if not isinstance(recalled, dict) or age_now is None:
+        return {"dream": text, "recalled": None}
+
+    memory_text = " ".join((recalled.get("text") or "").split())
+    try:
+        age = int(recalled.get("age"))
+    except (TypeError, ValueError):
+        logging.warning("сон: возраст не число: %r", recalled.get("age"))
+        return {"dream": text, "recalled": None}
+    if not memory_text:
+        return {"dream": text, "recalled": None}
+    if not 0 <= age <= age_now:
+        logging.warning("сон: возраст %s вне [0, %s] — вспомненное отброшено",
+                        age, age_now)
+        return {"dream": text, "recalled": None}
+
+    precision = recalled.get("precision")
+    if precision not in ("day", "month", "year", "era"):
+        precision = "era"
+    return {"dream": text,
+            "recalled": {"age": age, "precision": precision,
+                         "text": memory_text}}
+
+
+def dream(turn: Turn, canon: list[dict], born: datetime | None,
+          age_now: int | None, client, now=None) -> dict | None:
+    """Что приснилось этой ночью, или `None`. Любая неудача — не снилось.
+
+    Молчание, а не заглушка: ночь без снов — законная ночь, и отличить
+    «сеть не ответила» от «ничего не приснилось» снаружи нечем. Тот же
+    принцип, что у `speak_first` и у краёв (`sky`, `web`).
+
+    Нерождённому не снится: без `born_at` вспомненному не на что лечь, а
+    сну — нечего смещать. Проверка здесь, а не только у вызывающего, потому
+    что цена ошибки — запись в необратимую таблицу.
+    """
+    if born is None or age_now is None:
+        return None
+    prompt = _build_dream_prompt(turn, canon, born, age_now, now)
+    try:
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except OpenAIError as err:
+        logging.warning("сон: запрос упал: %s", err)
+        return None
+    return _parse_dream_output(response.choices[0].message.content or "",
+                               age_now)
