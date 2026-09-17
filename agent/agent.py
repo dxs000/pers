@@ -85,13 +85,24 @@ def resolve_place(eng, edges: cycle.Edges, now: datetime) -> bool:
     return True
 
 
-def finish_session(eng, now: datetime, client) -> dict | None:
+def finish_session(eng, now: datetime, edges: cycle.Edges) -> dict | None:
+    """Закрыть сессию: выжимка, эпизод и (Шаг 41) незакрытый вопрос.
+
+    **Края приезжают целиком, а не одной моделью.** До Шага 41 сюда
+    передавался `edges.llm`, и это было верно, пока читатель буфера был один.
+    Их стало два, и оба служебные; передавать модель дважды или тянуть второй
+    аргумент значило бы решать за `cycle`, чем ему пользоваться.
+
+    Порядок жёсткий: сначала эпизод, потом повод. Эпизод — память, повод —
+    настроение; упади процесс между ними, теряется второе, и это правильная
+    сторона для потери.
+    """
     buf = eng.summary_buffer()
     summary = None
     if buf.get("messages"):
         logging.info("записываю разговор: %s реплик", len(buf["messages"]))
         try:
-            summary = summarize_session(eng.snapshot(now), buf, client)
+            summary = summarize_session(eng.snapshot(now), buf, edges.llm)
         except Exception as err:
             logging.warning("finish_session: выжимка не собралась: %s", err)
     with eng.unit():
@@ -101,8 +112,15 @@ def finish_session(eng, now: datetime, client) -> dict | None:
             "сессия закрыта: %s, %s обменов, выжимка: %s",
             episode["id"], episode["exchanges"], "есть" if summary else "нет",
         )
+    # После закрытия, а не до: буфер уже прочитан, а повод не должен
+    # существовать у разговора, который ещё идёт. Промах сети роняет ровно
+    # этот проход — сессия к этому моменту закрыта и записана.
+    if buf.get("messages"):
+        try:
+            cycle.record_curiosity(eng, edges, eng.snapshot(now), buf, now)
+        except Exception as err:
+            logging.warning("finish_session: любопытство не собралось: %s", err)
     return episode
-
 
 def drain(eng, edges: cycle.Edges) -> None:
     while not _STOP:
@@ -112,7 +130,7 @@ def drain(eng, edges: cycle.Edges) -> None:
             announce=lambda _answer: store_pg.notify(
                 eng.conn, store_pg.CHANNEL_REPLY),
             close_session=lambda: finish_session(
-                eng, datetime.now(timezone.utc), edges.llm),
+                eng, datetime.now(timezone.utc), edges),
         )
         if outcome is None:
             if cycle.digest_one(eng, edges, now):
@@ -144,12 +162,16 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
     падать. Реактивная половина от этого не зависит и должна пережить
     сломанный фон.
 
-    **Фоновых дел с Шага 40 два, и за круг делается одно.** Сон пишет,
-    заговаривание говорит; оба ходят в модель, и сделать их подряд значило бы
-    на одном круге заплатить дважды за работу, которой никто не ждёт. Сон
-    идёт первым не по важности, а потому, что он почти всегда отказывает
-    сразу и бесплатно: не ночь — и заход кончился на первой проверке, не
-    сходив ни в базу за памятью, ни в модель.
+    **Фоновых дел с Шага 42 три, и за круг делается одно.** Сон пишет,
+    пересмотр черт пишет, заговаривание говорит; все трое ходят в модель, и
+    сделать их подряд значило бы на одном круге заплатить трижды за работу,
+    которой никто не ждёт.
+
+    Порядок — по цене отказа, а не по важности. Сон отказывает первой
+    проверкой и бесплатно (не ночь — и заход кончился, не сходив ни в базу за
+    памятью, ни в модель). Пересмотр черт — двумя счётными запросами. Фоновый
+    заход дороже обоих: он спрашивает погоду, то есть ходит в сеть, ещё до
+    того, как решит молчать.
 
     Приснившееся в этот же круг НЕ рассказывается. Импульс заведён, и
     подхватит его `background_tick` на следующем круге или утром — по своим
@@ -161,6 +183,11 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
             return
     except Exception as err:
         logging.warning("сон не приснился: %s", err)
+    try:
+        if cycle.reconsider_traits(eng, edges, now) is not None:
+            return
+    except Exception as err:
+        logging.warning("черты не пересмотрены: %s", err)
     try:
         cycle.background_tick(
             eng, edges, datetime.now(timezone.utc),
@@ -346,7 +373,7 @@ def main() -> int:
     boot = datetime.now(timezone.utc)
     resolve_place(eng, edges, boot)
     if eng.session_stale(boot):
-        finish_session(eng, boot, edges.llm)
+        finish_session(eng, boot, edges)
     place = eng.place()
     if place.get("label") and sky.local_snapshot(
             place.get("lat"), place.get("lon"), boot, config.TZ) is None:
@@ -358,7 +385,7 @@ def main() -> int:
     try:
         serve(eng, edges)
     finally:
-        finish_session(eng, datetime.now(timezone.utc), edges.llm)
+        finish_session(eng, datetime.now(timezone.utc), edges)
         eng.close()
         edges.close()
         logging.info("остановлен")

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 import config
-from snapshot import DEFAULT_TRAITS, Turn
+from snapshot import Turn
 
 
 class PgEngine:
@@ -22,11 +22,13 @@ class PgEngine:
             "SELECT name, traits, place_label FROM agent WHERE id = 1"
         ).fetchone() or {}
 
+        # Досева черт здесь больше НЕТ (Шаг 42). Он ставил новорождённому
+        # характер до того, как с ним что-либо произошло, — то же по природе,
+        # что имя 'Некто' до Шага 36.3, только заметить труднее: три
+        # правдоподобных слова не выглядят заглушкой. Черты теперь нажива-
+        # ются `cycle.reconsider_traits`, а до первого пересчёта их нет, и
+        # читатели промптов пустой список пропускают.
         with self.conn.transaction():
-            if not row.get("traits"):
-                self.conn.execute(
-                    "UPDATE agent SET traits = %s WHERE id = 1", (list(DEFAULT_TRAITS),)
-                )
             if not row.get("place_label") and config.APP_PLACE:
                 self.conn.execute(
                     "UPDATE agent SET place_label = %s, place_lat = %s, place_lon = %s "
@@ -64,6 +66,16 @@ class PgEngine:
 
     def last_dream_at(self):
         return self._pg.last_dream_at(self.conn)
+
+    # --- Черты (Шаг 42) ------------------------------------------------------
+    def set_traits(self, traits, now: datetime) -> None:
+        self._pg.set_traits(self.conn, traits, now)
+
+    def traits_at(self):
+        return self._pg.traits_at(self.conn)
+
+    def memories_since(self, at) -> int:
+        return self._pg.memories_since(self.conn, at)
 
     def record_birth(self, name: str, born_at, birthplace: str | None,
                      reason: str) -> bool:
