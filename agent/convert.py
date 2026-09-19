@@ -73,7 +73,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -88,16 +87,18 @@ from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+import config
+
 # =============================================================================
 # Полка
 # =============================================================================
-# Путь живёт ЗДЕСЬ, а не в `config`, ровно пока читатель один. С появлением
-# `library.py` (порция по смещению для демона) читателей станет двое, и тогда
-# переменная переедет в `config` — туда, где живёт всё, что читают из двух
-# мест. Заводить её там заранее значило бы завести переменную, которую
-# `config` обещает и никто не спрашивает, а докстринг `config` это запрещает
-# прямым текстом.
-LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", Path(__file__).parent / "library"))
+# Путь приезжает из `config`, потому что читателей у него двое: этот модуль и
+# `library.py`. Пока читатель был один, переменная жила здесь — по правилу
+# самого `config`, который запрещает обещать ручку, которую никто не
+# спрашивает. Читателей стало двое, и правило развернулось: разъехаться двум
+# копиям пути нельзя, иначе конвертер напишет в одну папку, а демон будет
+# читать из другой и честно сообщит, что полка пуста.
+LIBRARY_DIR = Path(config.LIBRARY_DIR)
 
 SOURCE_DIR = "source"
 TEXT_DIR = "text"
@@ -242,6 +243,38 @@ FB2_NS = "{http://www.gribuser.net/xml/fictionbook/2.0}"
 FB2_SKIP_BODIES = {"notes", "comments", "footnotes"}
 
 
+def _ln(tag) -> str:
+    """Локальное имя тега, без пространства имён.
+
+    Разбор НЕ привязан к `FB2_NS`, и это не запас прочности, а исправление
+    после первой же встречи с живым файлом. Спецификация fb2 существует в
+    версиях 2.0 и 2.1, самиздатовские файлы объявляют то одну, то другую, а
+    часть не объявляет пространства имён вовсе. Поиск по полному имени тега
+    находил в таких файлах ровно ничего — и сообщал «тело пустое», то есть
+    обвинял книгу в том, в чём был виноват разбор.
+
+    Локальное имя одинаково во всех трёх случаях. Цена — теоретическая
+    возможность спутать `<p>` из fb2 с `<p>` из вложенного чужого namespace;
+    в fb2 такого не бывает, а «тело пустое» бывает.
+    """
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _kids(el, name: str) -> list:
+    return [c for c in el if _ln(c.tag) == name]
+
+
+def _dig(el, *path: str) -> list:
+    """Спуск по дереву цепочкой локальных имён."""
+    current = [el]
+    for name in path:
+        nxt = []
+        for node in current:
+            nxt.extend(_kids(node, name))
+        current = nxt
+    return current
+
+
 def _fb2_text(el) -> str:
     """Текст элемента без ссылок на сноски.
 
@@ -253,8 +286,7 @@ def _fb2_text(el) -> str:
     if el.text:
         parts.append(el.text)
     for child in el:
-        tag = child.tag.replace(FB2_NS, "")
-        if tag == "a" and child.get("type") == "note":
+        if _ln(child.tag) == "a" and child.get("type") == "note":
             pass  # номер сноски выбрасывается вместе с содержимым
         else:
             parts.append(_fb2_text(child))
@@ -266,7 +298,7 @@ def _fb2_text(el) -> str:
 def _fb2_blocks(el, out: list[str]) -> None:
     """Рекурсивный обход тела fb2 в блоки текста."""
     for child in el:
-        tag = child.tag.replace(FB2_NS, "")
+        tag = _ln(child.tag)
         if tag == "title":
             title = " ".join(
                 t for t in (_fb2_text(p).strip() for p in child)
@@ -290,7 +322,7 @@ def _fb2_blocks(el, out: list[str]) -> None:
             # получится проза, набранная в строку.
             lines = []
             for stanza in child:
-                stag = stanza.tag.replace(FB2_NS, "")
+                stag = _ln(stanza.tag)
                 if stag == "stanza":
                     for v in stanza:
                         text = _fb2_text(v).strip()
@@ -315,19 +347,20 @@ def _fb2_blocks(el, out: list[str]) -> None:
 
 
 def _fb2_meta(root) -> tuple[str | None, str | None]:
-    info = root.find(f"{FB2_NS}description/{FB2_NS}title-info")
-    if info is None:
+    found = _dig(root, "description", "title-info")
+    if not found:
         return None, None
-    title_el = info.find(f"{FB2_NS}book-title")
-    title = (title_el.text or "").strip() if title_el is not None else None
+    info = found[0]
+    title_el = _kids(info, "book-title")
+    title = (title_el[0].text or "").strip() if title_el else None
     author = None
-    author_el = info.find(f"{FB2_NS}author")
-    if author_el is not None:
+    author_el = _kids(info, "author")
+    if author_el:
         names = []
         for part in ("first-name", "middle-name", "last-name"):
-            el = author_el.find(FB2_NS + part)
-            if el is not None and (el.text or "").strip():
-                names.append(el.text.strip())
+            el = _kids(author_el[0], part)
+            if el and (el[0].text or "").strip():
+                names.append(el[0].text.strip())
         author = " ".join(names) or None
     return title or None, author
 
@@ -370,12 +403,25 @@ def _extract_fb2(path: Path) -> Extracted | None:
 
     title, author = _fb2_meta(root)
     blocks: list[str] = []
-    for body in root.findall(f"{FB2_NS}body"):
+    bodies = _kids(root, "body")
+    for body in bodies:
         if (body.get("name") or "").lower() in FB2_SKIP_BODIES:
             continue
         _fb2_blocks(body, blocks)
     if not blocks:
-        log.warning("%s: тело пустое", path.name)
+        # Сообщение диагностическое, а не отчётное, и это осознанная трата
+        # четырёх строк. Прежнее «тело пустое» было верно по факту и
+        # бесполезно по существу: оно не позволяло отличить файл без текста от
+        # файла, который разбор не понял. Ровно на этом и обожглись —
+        # пространство имён оказалось другим, а виновата была «книга».
+        log.warning(
+            "%s: текста не нашлось. Корень <%s>, внутри: %s; тел: %s%s",
+            path.name, _ln(root.tag),
+            ", ".join(sorted({_ln(c.tag) for c in root})) or "пусто",
+            len(bodies),
+            "" if bodies else
+            ". Похоже, это не FictionBook — проверьте, что внутри файла",
+        )
         return None
     return Extracted(pages=["\n\n".join(blocks)], kind="fb2", tool="fb2/xml",
                      title=title, author=author, structured=True)
@@ -1240,9 +1286,14 @@ def convert_file(path: Path, root: Path, *, allow_ocr: bool = False,
         meta["accepted_anyway"] = True
 
     where = text_dir if (report.ok or accept) else reject_dir
-    (where / f"{name}.md").write_text(text, encoding="utf-8")
-    (where / f"{name}.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # `newline="\n"` — перевод строк НЕ транслируется под платформу. Позиция
+    # чтения считается в символах этого файла, и `\r\n` на windows сдвинул бы
+    # её ровно на число строк: молча, необратимо и уже после того, как
+    # персонаж начал читать.
+    with open(where / f"{name}.md", "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    with open(where / f"{name}.json", "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(meta, ensure_ascii=False, indent=2))
 
     # Отвергнутое не должно остаться в text/ с прошлого прогона: иначе
     # `--force` после правки порогов оставил бы каталогу книгу, которую сам же

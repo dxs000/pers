@@ -39,6 +39,7 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "60.0"))
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", BASE_DIR / "library"))
 
 # =============================================================================
 # Postgres
