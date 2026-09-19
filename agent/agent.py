@@ -44,6 +44,31 @@ def _norm_place(name: str) -> str:
     return (name or "").strip().lower().replace("ё", "е")
 
 
+def require_named_timezone() -> None:
+    """Падать, если APP_TZ задан числом или не задан вовсе (Шаг 0.2).
+
+    `parse_tz` понимает и «3», и «Europe/Helsinki», и раньше числовое
+    смещение считалось законной настройкой. Оно и работает — ровно полгода:
+    фиксированное смещение не знает про переход на зимнее время, и с конца
+    октября персонаж начинает ошибаться на час. Ошибаться молча — в логе
+    ничего, в промпте правдоподобное время, и выглядит это не как настройка,
+    а как «он опять путает время».
+
+    Предупреждение здесь не годится: оно ушло бы в лог демона, который никто
+    не читает, и по тому же доводу, по которому `config` ничего не печатает.
+    А `check_timezone` ниже эту ловушку не закрывала — она сравнивает зону
+    места с `config.TZ` и молчит, когда имя зоны не задано, то есть
+    срабатывает только там, где проблемы уже нет.
+    """
+    spec = (config.TZ_SPEC or "").strip()
+    if not spec or spec.lstrip("+-")[:1].isdigit():
+        raise RuntimeError(
+            f"APP_TZ={spec or '(не задан)'} — числовое смещение не знает про "
+            "переход на зимнее время. Задайте именем зоны, например "
+            "APP_TZ=Europe/Helsinki"
+        )
+
+
 def check_timezone(zone_name: str | None, now: datetime) -> None:
     if not zone_name:
         return
@@ -178,6 +203,17 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
     заслонкам, а не потому, что сон случился только что.
     """
     now = datetime.now(timezone.utc)
+    # Обещания — первыми (Шаг 43), и это порядок, а не очерёдность: долг не
+    # проходит через заслонки инициативы, и пропустить его сквозь них
+    # невозможно — исчерпанный бюджет суток проглотил бы напоминание молча.
+    try:
+        if cycle.promise_tick(
+                eng, edges, now,
+                announce=lambda _text: store_pg.notify(
+                    eng.conn, store_pg.CHANNEL_REPLY)) is not None:
+            return
+    except Exception as err:
+        logging.warning("напоминание не удалось: %s", err)
     try:
         if cycle.dream_tick(eng, edges, now) is not None:
             return
@@ -354,6 +390,14 @@ def main() -> int:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
         
+    # До всего остального: пояс участвует и в рождении (дата), и в ночи, и в
+    # сроках обещаний. Ошибиться в нём молча дороже, чем не запуститься.
+    try:
+        require_named_timezone()
+    except RuntimeError as err:
+        logging.error("%s", err)
+        return 2
+
     if args.genesis:
         return cmd_genesis(args.text, write=args.write)
     signal.signal(signal.SIGTERM, _on_signal)

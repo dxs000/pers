@@ -94,7 +94,12 @@ EXIT_WORD = os.getenv("EXIT_WORD", "exit")
 # ("Asia/Tbilisi") — только если в системе есть база tzdata. На голом
 # сервере её может не быть, и `parse_tz` тогда молча вернёт дефолт:
 # согласованность пояса с местом проверяет `main.check_timezone`.
-TZ = parse_tz(os.getenv("APP_TZ", "3"))
+# Дефолта больше нет (Шаг 0.2): «3» работало полгода в году и молча
+# врало вторые полгода. Спецификация держится отдельно от разобранной
+# зоны — `agent.require_named_timezone` проверяет именно её, а
+# `parse_tz` к этому моменту уже забыл, что ему дали.
+TZ_SPEC = os.getenv("APP_TZ", "").strip()
+TZ = parse_tz(TZ_SPEC)
 
 
 def _coord(name: str) -> float | None:

@@ -1132,6 +1132,110 @@ def open_impulses(conn) -> list[dict]:
 
 
 # =============================================================================
+# Обещания (Шаг 43). Долг, а не побуждение
+# =============================================================================
+def add_promise(conn, due_at, text: str, message_id=None, now=None) -> int:
+    """Записать обещание. Возвращает id.
+
+    `created_at` передаётся, а не берётся из `now()` в SQL: писатель живёт в
+    T2, то есть может отстать от разговора на минуты, а `promises_due_ck`
+    сравнивает срок именно с моментом, когда просили. Возьми базу за часы —
+    и обещание «через минуту», записанное с опозданием, упало бы на проверке.
+    """
+    return conn.execute(
+        """
+        INSERT INTO promises (created_at, due_at, text, message_id)
+        VALUES (%s, %s, %s, %s) RETURNING id
+        """,
+        (now, due_at, text, message_id),
+    ).fetchone()["id"]
+
+
+def close_acknowledged_promises(conn, spoke_at) -> int:
+    """Закрыть напомненное, на что собеседник отозвался. Возвращает сколько.
+
+    Подтверждение — любая реплика человека ПОСЛЕ напоминания, а не слово
+    «принял»: см. `0007_promises.sql`. Метка берётся из `agent`, потому что
+    там она уже есть — заводить запрос к `messages` ради того же числа значило
+    бы спросить самую длинную таблицу о том, что лежит в самой короткой.
+    """
+    if spoke_at is None:
+        return 0
+    rows = conn.execute(
+        """
+        UPDATE promises SET closed_at = %(now)s
+         WHERE closed_at IS NULL
+           AND said_at IS NOT NULL
+           AND said_at < %(spoke)s
+        RETURNING id
+        """,
+        {"now": spoke_at, "spoke": spoke_at},
+    ).fetchall()
+    return len(rows)
+
+
+def due_promise(conn, now, repeat_after_hours: float):
+    """Самое раннее обещание, о котором пора сказать, или `None`.
+
+    Сроком, а не силой: у долгов нет `ORDER BY urge`, и первым идёт тот, кто
+    ждёт дольше. Одно за заход — человек услышит одну реплику, а не список.
+
+    Ещё не сказанное берётся сразу по наступлении срока; сказанное — не раньше
+    чем через `repeat_after_hours`, и только если его не закрыли как
+    подтверждённое.
+    """
+    return conn.execute(
+        """
+        SELECT id, created_at, due_at, text, said_at, repeats
+          FROM promises
+         WHERE closed_at IS NULL
+           AND due_at <= %(now)s
+           AND (said_at IS NULL
+                OR said_at <= %(now)s - make_interval(secs => %(gap)s))
+         ORDER BY due_at, id
+         LIMIT 1
+        """,
+        {"now": now, "gap": repeat_after_hours * 3600.0},
+    ).fetchone()
+
+
+def mark_promise_said(conn, promise_id: int, now, *, close: bool) -> None:
+    """Напомнил. `close` — попытки исчерпаны, больше не возвращаться.
+
+    Закрытие решает вызывающий, а не SQL: предел попыток — правило поведения
+    («спросить один раз — забота, три — надзор»), и жить ему рядом с
+    заслонками инициативы, а не в хранилище.
+    """
+    conn.execute(
+        """
+        UPDATE promises
+           SET said_at = %(now)s,
+               repeats = repeats + 1,
+               closed_at = CASE WHEN %(close)s THEN %(now)s ELSE closed_at END
+         WHERE id = %(id)s
+        """,
+        {"now": now, "close": close, "id": promise_id},
+    )
+
+
+def open_promises(conn) -> list[dict]:
+    """Все незакрытые, ближний срок сверху. Для инспектора и сбруи."""
+    rows = conn.execute(
+        """
+        SELECT id, created_at, due_at, text, said_at, repeats
+          FROM promises WHERE closed_at IS NULL
+         ORDER BY due_at, id
+        """
+    ).fetchall()
+    return [
+        {"id": r["id"], "text": r["text"], "repeats": r["repeats"],
+         "created_at": iso(r["created_at"]), "due_at": iso(r["due_at"]),
+         "said_at": iso(r["said_at"])}
+        for r in rows
+    ]
+
+
+# =============================================================================
 # Очередь входящих (Шаг 28). Потребитель есть, демона ещё нет
 # =============================================================================
 def push_inbox(conn, text: str, now) -> int:
@@ -1504,7 +1608,13 @@ def mark_digest_done(conn, followup_id, now) -> None:
 def exchange_by_reply(conn, reply_id):
     return conn.execute(
         """
-        SELECT u.text AS user_text, a.text AS answer
+        -- `asked_at` добавлен на Шаге 43. T2 отстаёт от разговора на минуты,
+        -- а может — на часы, если демон лежал; «через пять часов» обязано
+        -- отсчитываться от момента просьбы, а не от момента разбора.
+        -- `reply_id` тоже отдаётся наружу: обещанию нужен указатель на то,
+        -- откуда оно взялось.
+        SELECT u.text AS user_text, a.text AS answer,
+               u.ts AS asked_at, u.id AS asked_id
           FROM messages a
           JOIN messages u
             ON u.session_id = a.session_id

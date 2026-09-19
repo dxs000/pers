@@ -14,9 +14,9 @@ import timeutil
 import web
 from mind import (VERDICT_WRITE, build_system_prompt, check_memory,
                   decide_query, dream, dream_subject, extract_memories,
-                  extract_objects, linger, propose_birthplaces, propose_names,
-                  reflect_mood, reflect_self, reflect_traits, speak_first,
-                  weather_family)
+                  extract_objects, linger, notice_promise, propose_birthplaces,
+                  propose_names, reflect_mood, reflect_self, reflect_traits,
+                  say_promise, speak_first, weather_family)
 from snapshot import SESSION_GAP_HOURS, iso
 from openai import OpenAI, OpenAIError
 
@@ -250,6 +250,15 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
         logging.info("digest extract_objects: %.1fs", time.monotonic() - t)
         remembered = _biograph(eng, edges, turn, pair, now)
         logging.info("digest биограф: %.1fs", time.monotonic() - t)
+        # Обещание (Шаг 43). Отсчёт идёт от `asked_at` — момента, когда
+        # просили, — а не от `now`: T2 отстаёт от разговора на минуты, а после
+        # простоя демона может отстать на часы, и «через пять часов»,
+        # посчитанное от разбора, сдвинулось бы вместе с очередью.
+        asked_at = pair.get("asked_at") or now
+        promised = notice_promise(
+            turn, pair["user_text"], pair["answer"], edges.llm,
+            asked_at=asked_at, tz=config.TZ)
+        logging.info("digest обещание: %.1fs", time.monotonic() - t)
         with eng.unit():
             if new_mood:
                 eng.set_mood(new_mood)
@@ -259,6 +268,11 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
                 eng.upsert_object(cand, now)
             for happened_at, precision, text in remembered:
                 eng.add_memory(happened_at, precision, text, "told")
+            if promised:
+                due_at, what = promised
+                eng.add_promise(due_at, what, pair.get("asked_id"),
+                                now=asked_at)
+                logging.info("обещание записано: %s -> %s", iso(due_at), what)
             eng.mark_digest_done(job["id"], now)
         return True
     except Exception as err:
@@ -432,6 +446,101 @@ def _pick_impulse(eng, now: datetime) -> dict | None:
     if not candidates:
         return None
     return max(candidates, key=lambda c: c["urge"])
+
+
+# =============================================================================
+# Обещания (Шаг 43): сначала долг, потом желание
+# =============================================================================
+# **Отдельный заход, а не ветка `background_tick`** — по тому же доводу, по
+# которому отдельным сделан сон: дела разные. Фоновый заход решает «говорить
+# или молчать» и имеет право ответить «молчать» всегда. Здесь решать нечего:
+# срок пришёл, значит сказать надо.
+#
+# Отсюда и место в `agent.idle_tick` — ДО фонового захода. Порядок не
+# косметический: заслонки инициативы (порог, пауза, бюджет суток) устроены
+# так, чтобы персонаж не был навязчивым, и пропустить сквозь них долг
+# невозможно — исчерпанный бюджет проглотил бы напоминание молча, и в логе
+# это выглядело бы штатной работой.
+#
+# Специальной координации между заходами не понадобилось. Напомнив, персонаж
+# зовёт `append_utterance`; `background_tick` на том же круге увидит
+# `last_utterance` нулевой давности и промолчит по собственной паузе. Заслонка
+# сработала ровно так, как задумана: человек услышал реплику, и вторая подряд
+# ему не нужна.
+
+# Через сколько напомнить второй раз, если ответа не было. Полчаса: меньше —
+# и это уже понукание, больше — и напоминание опоздает к делу, ради которого
+# заводилось.
+PROMISE_REPEAT_HOURS = 0.5
+
+# Сколько раз всего. Два: сказать и повторить. Правило то же, что у нитей и у
+# любопытства — спросить один раз забота, три надзор. Молчание в ответ на
+# второй раз означает, что человек увидел и не хочет отвечать, и третий раз
+# спорил бы с его решением.
+PROMISE_ATTEMPTS = 2
+
+
+def promise_tick(eng, edges: Edges, now: datetime, *,
+                 announce: Callable[[str], None] | None = None,
+                 tz=None) -> str | None:
+    """Один заход по обещаниям: закрыть отвеченные, напомнить о созревшем.
+
+    Возвращает сказанное или `None`. В отличие от фонового захода, `None`
+    здесь означает «нечего напоминать», а не «решил промолчать».
+
+    Заслонок нет ни одной, и это осознанно. Единственное ограничение —
+    `PROMISE_ATTEMPTS`, и оно не заслонка от навязчивости, а признание того,
+    что после второго молчания напоминать больше нечего.
+    """
+    # Закрытие отвеченных идёт первым и в своей транзакции: это уборка, она
+    # не зависит от того, найдётся ли созревшее, и терять её из-за упавшего
+    # ниже вызова модели незачем.
+    spoke_at = eng.last_exchange_ts()
+    if spoke_at is not None:
+        with eng.unit():
+            closed = eng.close_acknowledged_promises(spoke_at)
+        if closed:
+            logging.info("обещания: закрыто по ответу собеседника: %d", closed)
+
+    row = eng.due_promise(now, PROMISE_REPEAT_HOURS)
+    if not row:
+        return None
+
+    promise = dict(row)
+    late_hours = max((now - promise["due_at"]).total_seconds() / 3600.0, 0.0)
+    attempt = (promise["repeats"] or 0) + 1
+
+    tz = tz or config.TZ
+    place = eng.place()
+    snap = sky_mod.local_snapshot(place.get("lat"), place.get("lon"), now, tz)
+
+    # Погоды здесь нет намеренно, в отличие от `background_tick`. Там она
+    # нужна, чтобы ЗАМЕТИТЬ событие — пропустишь, и оно потеряно. Здесь
+    # событие уже известно, а лезть в сеть ради антуража одной фразы значило
+    # бы поставить напоминание в зависимость от чужого сервиса.
+    turn = eng.snapshot(now)
+    text = say_promise(
+        turn, promise, edges.llm,
+        memory=eng.working_memory(),
+        now=now.astimezone(tz), sky=snap, weather=None,
+        last_exchange=eng.last_exchange(),
+        late_hours=late_hours,
+    )
+
+    with eng.unit():
+        eng.append_utterance(text, now)
+        eng.mark_promise_said(promise["id"], now,
+                              close=attempt >= PROMISE_ATTEMPTS)
+        # Соседние побуждения глушатся так же, как после любой реплики:
+        # человек услышал персонажа, и заговорить снова через паузу — то же
+        # самое, от чего заслонка инициативы и защищает.
+        eng.damp_impulses(IMPULSE_DAMP)
+
+    logging.info("напомнил (обещание %d, попытка %d, опоздание %.1f ч): %s",
+                 promise["id"], attempt, late_hours, text[:60])
+    if announce is not None:
+        announce(text)
+    return text
 
 
 def background_tick(eng, edges: Edges, now: datetime, *,

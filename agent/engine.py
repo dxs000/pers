@@ -161,6 +161,35 @@ class PgEngine:
     def open_impulses(self) -> list[dict]:
         return self._pg.open_impulses(self.conn)
 
+    # --- Обещания (Шаг 43) ---------------------------------------------------
+    def add_promise(self, due_at, text: str, message_id=None,
+                    now: datetime | None = None) -> int:
+        return self._pg.add_promise(self.conn, due_at, text, message_id, now)
+
+    def close_acknowledged_promises(self, spoke_at) -> int:
+        return self._pg.close_acknowledged_promises(self.conn, spoke_at)
+
+    def due_promise(self, now: datetime, repeat_after_hours: float):
+        return self._pg.due_promise(self.conn, now, repeat_after_hours)
+
+    def mark_promise_said(self, promise_id: int, now: datetime, *,
+                          close: bool) -> None:
+        self._pg.mark_promise_said(self.conn, promise_id, now, close=close)
+
+    def open_promises(self) -> list[dict]:
+        return self._pg.open_promises(self.conn)
+
+    def last_exchange_ts(self):
+        """Когда собеседник в последний раз что-то написал.
+
+        Отдельно от `last_exchange()`, который отдаёт текст: обещаниям нужен
+        только момент, и тянуть ради него пару реплик из `messages` незачем.
+        """
+        row = self.conn.execute(
+            "SELECT last_exchange_ts FROM agent WHERE id = 1"
+        ).fetchone()
+        return row["last_exchange_ts"] if row else None
+
     def push(self, text: str, now: datetime) -> int:
         return self._pg.push_inbox(self.conn, text, now)
 
