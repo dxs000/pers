@@ -446,6 +446,39 @@ def sense_impulses(eng, now: datetime, wx) -> list[Urge]:
 #                 час, что у сна: час без реплик — уже не разговор;
 #   раз в сутки — запись необратима. Два вечера за один вечер не «подробный
 #                 день», а вдвое быстрее исписанная жизнь.
+# Нити (Шаг 47). Через сколько брошенное закрывается само. Три недели — срок,
+# за который человек либо возвращается к начатому, либо уже не вернётся; он же
+# достаточно велик, чтобы отпуск или болезнь не стёрли всё разом.
+THREAD_FORGET_DAYS = 21.0
+THREAD_DONE = "кончилось"
+THREAD_FORGOTTEN = "забылось"
+
+# Сколько общих значимых слов считаем упоминанием. Два: одно даёт ложные
+# срабатывания на любом «работа» или «письмо», три — почти не срабатывает на
+# фразах в полдюжины слов.
+THREAD_MENTION_WORDS = 2
+
+
+def _mentions(thread_text: str, scenes: list[str]) -> bool:
+    """Упоминают ли сцены эту нить. Грубо, по общим словам, и НАМЕРЕННО грубо.
+
+    Точный ответ дала бы модель, но это лишний вызов каждый вечер ради
+    величины, ошибка в которой стоит недорого: не заметили возвращение — нить
+    остынет на день раньше; заметили лишнее — проживёт на день дольше. Ни то
+    ни другое не попадает в канон и ничего не удаляет.
+    """
+    def significant(text: str) -> set[str]:
+        return {w for w in "".join(
+            c.lower() if c.isalnum() else " " for c in text).split()
+            if len(w) > 4}
+
+    want = significant(thread_text)
+    if not want:
+        return False
+    return any(len(want & significant(scene)) >= THREAD_MENTION_WORDS
+               for scene in scenes)
+
+
 DAY_HOUR_FROM = 20          # с восьми вечера по его месту
 DAY_HOUR_TO = 24            # до полуночи; после — уже ночь и уже сон
 DAY_QUIET_HOURS = 1.0       # столько никто не пишет — считаем, что он один
@@ -497,10 +530,21 @@ def day_tick(eng, edges: Edges, now: datetime, *, tz=None) -> list[str] | None:
     # значение тут почти всегда есть, а почти всегда - достаточно для антуража.
     weather = (eng.outside_latch() or {}).get("weather")
 
+    # Забывание — до прохода и без модели (Шаг 47). Три недели тишины это
+    # арифметика, а не суждение, и брошенная линия не должна ехать в промпт
+    # как живая: спрошенный про неё персонаж принялся бы её продолжать.
+    with eng.unit():
+        forgotten = eng.forget_threads(now, THREAD_FORGET_DAYS, THREAD_FORGOTTEN)
+    for t in forgotten:
+        logging.info("нить забылась: %s", t["text"][:60])
+
+    threads = eng.open_threads("self")
     canon = eng.all_memories()
-    scenes = day(turn, canon, born, age_now, edges.llm,
-                 now=local, weather=weather,
-                 yesterday=previous["text"] if previous else None)
+    got = day(turn, canon, born, age_now, edges.llm,
+              now=local, weather=weather,
+              yesterday=previous["text"] if previous else None,
+              threads=threads)
+    scenes = got["scenes"]
 
     # Ворота сверки - те же, что у биографа и у вспомненного во сне. Прожитое
     # МОЖЕТ противоречить канону (в отличие от приснившегося), и ложится оно
@@ -514,9 +558,22 @@ def day_tick(eng, edges: Edges, now: datetime, *, tz=None) -> list[str] | None:
         if verdict == VERDICT_WRITE:
             written.append(scene)
 
+    # Нити, к которым сегодня возвращались, узнаются по СЦЕНАМ, а не по
+    # отдельному полю в ответе. Поле пришлось бы держать в согласии со
+    # сценами — то есть спрашивать модель дважды об одном, — а сцена,
+    # упоминающая дело, и есть возвращение к нему.
+    touched = [t["id"] for t in threads
+               if written and _mentions(t["text"], written)]
+
     with eng.unit():
         for scene in written:
             eng.add_memory(now, "day", scene, "lived", now=now)
+        for text in got["opened"]:
+            eng.open_thread("self", text, now)
+        if touched:
+            eng.touch_threads(touched, now)
+        if got["closed"]:
+            eng.close_threads(got["closed"], now, THREAD_DONE)
         # Метка двигается ВСЕГДА, в том числе после пустого дня и после сцен,
         # отвергнутых сверкой. Тот же приём, что у `traits_at` (Шаг 42):
         # неудача - не повод повторять её через пять секунд на тех же входах.

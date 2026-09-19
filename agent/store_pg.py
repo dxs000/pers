@@ -51,6 +51,7 @@ from snapshot import (SESSION_GAP_HOURS, WORKING_MEMORY_EXCHANGES, Turn, iso,
 # Порог отсечки по важности. Был продублирован из `store` (движок не может
 # зависеть от движка); с Шага 26 копия одна и живёт здесь.
 SALIENCE_FLOOR = 0.05
+THREADS_SNAPSHOT_LIMIT = 3
 MEMORIES_LIMIT = 3
 SELF_ID = 0
 
@@ -276,6 +277,7 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
         place_label=agent.get("place_label"),
         self_assertions=by_object.get(SELF_ID, []),
         outside_latch=agent.get("outside_latch"),
+        threads=open_threads(conn, "self", THREADS_SNAPSHOT_LIMIT),
         episodes=[
             {
                 "id": f"ep_{e['id']}",
@@ -480,6 +482,107 @@ def memories_since(conn, at) -> int:
     ).fetchone()["n"]
 
 
+# =============================================================================
+# Нити (Шаг 47): незакрытые линии
+# =============================================================================
+def open_threads(conn, side: str = "self", limit: int | None = None) -> list[dict]:
+    """Открытые нити, свежие сверху. Порядок — свежесть возвращения.
+
+    `limit` задаёт вызывающий, а не константа здесь: промпту персонажа нужны
+    три, вечернему проходу — все, инспектору — все. Хранилище отбирает, но не
+    решает сколько (то же правило, что у `MEMORIES_LIMIT`, который живёт рядом
+    со своим единственным читателем).
+    """
+    rows = conn.execute(
+        """
+        SELECT id, side, text, opened_at, touched_at
+          FROM threads
+         WHERE closed_at IS NULL AND side = %s
+         ORDER BY touched_at DESC, id
+         LIMIT %s
+        """,
+        (side, limit),
+    ).fetchall()
+    return [{"id": r["id"], "side": r["side"], "text": r["text"],
+             "opened_at": iso(r["opened_at"]), "touched_at": iso(r["touched_at"])}
+            for r in rows]
+
+
+def open_thread(conn, side: str, text: str, now) -> int:
+    """Завести нить. `touched_at` = `opened_at`: открыть значит вернуться."""
+    return conn.execute(
+        """
+        INSERT INTO threads (side, text, opened_at, touched_at)
+        VALUES (%s, %s, %s, %s) RETURNING id
+        """,
+        (side, text.strip(), now, now),
+    ).fetchone()["id"]
+
+
+def touch_threads(conn, ids, now) -> int:
+    """К нитям вернулись. Возвращает, скольких это коснулось.
+
+    Закрытые не трогаются: вернуться к закрытому нельзя, а молча воскрешать
+    его по номеру из ответа модели — значит дать проходу власть, которой у
+    него нет.
+    """
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0
+    rows = conn.execute(
+        "UPDATE threads SET touched_at = %s "
+        " WHERE id = ANY(%s) AND closed_at IS NULL RETURNING id",
+        (now, ids),
+    ).fetchall()
+    return len(rows)
+
+
+def close_threads(conn, ids, now, why: str) -> int:
+    """Закрыть названные. `why` отличает доведённое от брошенного."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0
+    rows = conn.execute(
+        "UPDATE threads SET closed_at = %s, closed_why = %s "
+        " WHERE id = ANY(%s) AND closed_at IS NULL RETURNING id",
+        (now, why, ids),
+    ).fetchall()
+    return len(rows)
+
+
+def forget_threads(conn, now, older_than_days: float, why: str) -> list[dict]:
+    """Закрыть то, к чему давно не возвращались. Без модели — это арифметика.
+
+    Возвращает закрытое, а не число: забытое стоит того, чтобы попасть в лог
+    поимённо. Брошенная линия — единственное в проекте, что исчезает из виду
+    само, и заметить это должно быть легко.
+    """
+    rows = conn.execute(
+        """
+        UPDATE threads SET closed_at = %(now)s, closed_why = %(why)s
+         WHERE closed_at IS NULL
+           AND touched_at < %(now)s - make_interval(days => %(days)s)
+        RETURNING id, text
+        """,
+        {"now": now, "why": why, "days": int(older_than_days)},
+    ).fetchall()
+    return [{"id": r["id"], "text": r["text"]} for r in rows]
+
+
+def all_threads(conn) -> list[dict]:
+    """Все, включая закрытые. Для инспектора и сбруи."""
+    rows = conn.execute(
+        """
+        SELECT id, side, text, opened_at, touched_at, closed_at, closed_why
+          FROM threads ORDER BY id
+        """
+    ).fetchall()
+    return [{"id": r["id"], "side": r["side"], "text": r["text"],
+             "opened_at": iso(r["opened_at"]), "touched_at": iso(r["touched_at"]),
+             "closed_at": iso(r["closed_at"]), "closed_why": r["closed_why"]}
+            for r in rows]
+
+
 def last_lived(conn):
     """Последняя прожитая сцена: когда записана и что в ней (Шаг 46).
 
@@ -579,8 +682,9 @@ def _fill_fixture(conn, state: dict) -> None:
     # `messages`, обязана быть названа тут поимённо, иначе изоляция сценариев
     # через неё течёт.
     conn.execute("TRUNCATE objects, assertions, episodes, aliases, sessions, "
-                 "messages, impulses, memories, promises RESTART IDENTITY CASCADE") 
-    
+                 "messages, impulses, memories, promises, threads "
+                 "RESTART IDENTITY CASCADE")
+
     conn.execute(
         """
         -- `last_search_ts` сбрасывается в NULL, а не приезжает из фикстура:
@@ -654,6 +758,17 @@ def _fill_fixture(conn, state: dict) -> None:
             """,
             (m["happened_at"], m["precision"], m["text"], m["source"],
              m.get("weight", 1.0), m.get("created_at")),
+        )
+
+    for t in state.get("threads", []):
+        conn.execute(
+            """
+            INSERT INTO threads (side, text, opened_at, touched_at,
+                                 closed_at, closed_why)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (t.get("side", "self"), t["text"], t["opened_at"], t["touched_at"],
+             t.get("closed_at"), t.get("closed_why")),
         )
 
     for oid, o in state.get("objects", {}).items():

@@ -824,7 +824,7 @@ def _fresh_engine():
     # фикстура в ЧИСТЫЙ СТАРТ, то есть ровно туда, где её быть не может: у
     # новорождённого не бывает причины настроения, а эталон показывал чужую.
     eng.conn.execute("TRUNCATE objects, assertions, episodes, aliases, "
-                     "sessions, messages, memories, impulses, promises "
+                     "sessions, messages, memories, impulses, promises, threads "
                      "RESTART IDENTITY CASCADE")
     eng.conn.execute("UPDATE agent SET name = DEFAULT, born_at = NULL,"
                      "birthplace = NULL, traits = DEFAULT,  mood = DEFAULT,"
@@ -1775,16 +1775,28 @@ DAY_EVENING = NOW + timedelta(hours=7)          # 20:00 по месту
 DAY_NEXT = DAY_EVENING + timedelta(hours=24)    # следующий вечер
 
 _DAY_SCRIPT = [
-    ("день", "Полдня правил чужой текст про виноградники, автор обиделся на "
-             "каждую вторую правку.\n"
-             "Вечером дошёл до Ортачалы пешком, хотя собирался на маршрутку."),
+    ("день", '{"scenes": ["Полдня правил чужой текст про виноградники, автор обиделся на каждую вторую правку.", "Вечером дошёл до Ортачалы пешком, хотя собирался на маршрутку."], "opened": ["дописать свою статью про виноградники, редактор ждёт в понедельник", "помириться с автором, которого обидел правками"], "closed": []}'),
     # Сверка зовётся на КАЖДУЮ сцену отдельно: вердикты у них разные, и
-    # проверить это можно только парой. Вторая противоречит канону — персонаж
-    # живёт в Тбилиси, а сцена ставит его в Кутаиси.
+    # проверить это можно только парой. Вторая противоречит канону.
     ("сверка", "записать"),
     ("сверка", "противоречит"),
-    ("день", "ничего"),
+    ("день", '{"scenes": ["Сел наконец за свою статью про виноградники, написал полторы страницы и бросил."], "opened": [], "closed": [2]}'),
+    ("сверка", "записать"),
+    ("день", '{"scenes": [], "opened": [], "closed": []}'),
 ]
+
+
+def _dump_threads(eng) -> str:
+    rows = eng.all_threads()
+    if not rows:
+        return "нити: нет"
+    out = ["нити:",
+           f"  {'№':<3} | {'сторона':<6} | {'возвращались':<26} | "
+           f"{'закрыта':<10} | текст"]
+    for r in rows:
+        out.append(f"  {r['id']:<3} | {r['side']:<6} | {r['touched_at']:<26} | "
+                   f"{(r['closed_why'] or '—'):<10} | {r['text'][:60]}")
+    return "\n".join(out)
 
 
 def _run_day() -> str:
@@ -1834,8 +1846,13 @@ def _run_day() -> str:
     prompt = llm.seen[0][0]["content"]
     run(DAY_EVENING + timedelta(hours=1), "тот же вечер, +1 ч")
 
-    run(DAY_NEXT, "следующий вечер, день пуст")
-    run(DAY_NEXT + timedelta(minutes=5), "сразу после пустого, +5 мин")
+    run(DAY_NEXT, "следующий вечер: вернулся к нити 1, закрыл нить 2")
+    threads_after = _dump_threads(eng)
+
+    # Три недели спустя. Нить 1 последний раз трогали в прошлый заход, и к
+    # этому вечеру она перевалила за `THREAD_FORGET_DAYS` — закроется сама,
+    # без модели. Вечерний проход при этом состоится: пустой день тоже день.
+    run(DAY_NEXT + timedelta(days=22), "через 22 дня, день пуст")
 
     return (
         f"ПРОМПТ ДНЯ:\n{prompt}\n"
@@ -1848,7 +1865,11 @@ def _run_day() -> str:
         + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
         + f"\n{'=' * 60}\n"
         f"канон ДО:\n{before}\n"
-        f"канон ПОСЛЕ:\n{_dump_memories(eng)}"
+        f"канон ПОСЛЕ:\n{_dump_memories(eng)}\n"
+        f"{'=' * 60}\n"
+        f"нити после второго вечера:\n{threads_after}\n"
+        f"нити после третьего (забывание через {cycle.THREAD_FORGET_DAYS:.0f} "
+        f"дней):\n{_dump_threads(eng)}"
     )
 
 

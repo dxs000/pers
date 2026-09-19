@@ -207,6 +207,8 @@ class Turn:
     # экстрактору для матчинга, а сопоставлять воспоминания сегодня некому.
     memories: list[dict] = field(default_factory=list)
     outside_latch: dict | None = None
+    # Незакрытые линии (Шаг 47), уже отобранные и ограниченные хранилищем.
+    threads: list[dict] = field(default_factory=list)
 
     # --- Мир ----------------------------------------------------------------
     episodes: list[dict] = field(default_factory=list)

@@ -64,6 +64,25 @@ class PgEngine:
     def touch_recall(self, memories, now: datetime) -> None:
         self._pg.touch_recall(self.conn, memories, now)
 
+    # --- Нити (Шаг 47) -------------------------------------------------------
+    def open_threads(self, side: str = "self", limit: int | None = None) -> list[dict]:
+        return self._pg.open_threads(self.conn, side, limit)
+
+    def open_thread(self, side: str, text: str, now: datetime) -> int:
+        return self._pg.open_thread(self.conn, side, text, now)
+
+    def touch_threads(self, ids, now: datetime) -> int:
+        return self._pg.touch_threads(self.conn, ids, now)
+
+    def close_threads(self, ids, now: datetime, why: str) -> int:
+        return self._pg.close_threads(self.conn, ids, now, why)
+
+    def forget_threads(self, now: datetime, days: float, why: str) -> list[dict]:
+        return self._pg.forget_threads(self.conn, now, days, why)
+
+    def all_threads(self) -> list[dict]:
+        return self._pg.all_threads(self.conn)
+
     # --- День (Шаг 46) -------------------------------------------------------
     def last_lived(self):
         return self._pg.last_lived(self.conn)

@@ -217,6 +217,17 @@ def build_system_prompt(
     # кончалась бы точкой и пробелом.
     parts.append(f"{who}. {head}".strip() if who else head)
 
+    # Незакрытое (Шаг 47). Стоит ПОСЛЕ «кто ты» и ДО места и времени: это не
+    # свойство персонажа и не обстановка вокруг, а то, чем он занят, — и в
+    # разговоре оно всплывает само, без вопроса.
+    #
+    # Собирается из `turn`, а не запросом: снимок уже отобрал и ограничил, и
+    # второй отбор той же памяти был бы вторым правилом о ней.
+    if turn.threads:
+        parts.append(
+            "Что у тебя не закончено (упоминай, только если к месту):\n"
+            + "\n".join(f"- {t['text']}" for t in turn.threads))
+
     label = turn.place_label
     if label:
         parts.append(f"Ты в {label}.")
@@ -2171,6 +2182,14 @@ DAY_SCENES_LIMIT = 2
 # день, перестаёт значить что-либо про отдельный день.
 
 DAY_NONE = "ничего"
+
+# Сколько нитей персонаж может открыть за вечер и сколько показывать в его
+# собственном промпте. Оба числа малы, и по одной причине: незакрытое — это то,
+# что всплывает в голове само, а всплывает само не восемь вещей.
+THREADS_OPENED_LIMIT = 2
+THREADS_PROMPT_LIMIT = 3
+# Обрезка нити. Длиннее — значит модель описала проект, а не назвала дело.
+THREAD_TEXT_LIMIT = 120
 # Слово отказа. Пустой день — законный и нередкий исход, и он честнее
 # натянутой сцены: выдуманное «сходил за хлебом» ложится в канон навсегда и
 # ничем не отличается от настоящего.
@@ -2178,7 +2197,8 @@ DAY_NONE = "ничего"
 
 def _build_day_prompt(turn: Turn, canon: list[dict], born: datetime | None,
                       age_now: int | None, now=None, weather: str | None = None,
-                      yesterday: str | None = None) -> str:
+                      yesterday: str | None = None,
+                      threads: list[dict] | None = None) -> str:
     """Промпт дня. Вчерашнее обязательно, и оно тут не для связности.
 
     День без вчера — независимый эпизод: модель, которой дали только канон,
@@ -2209,6 +2229,11 @@ def _build_day_prompt(turn: Turn, canon: list[dict], born: datetime | None,
     parts.append("Вся его жизнь, как она записана:")
     parts.append(_render_canon(canon, born) + "\n")
 
+    if threads:
+        parts.append(
+            "Что у него сейчас не закончено (номер - чтобы на него сослаться):\n"
+            + "\n".join(f"[{t['id']}] {t['text']}" for t in threads) + "\n")
+
     if yesterday:
         parts.append(f"Чем кончился прошлый его день:\n- {yesterday}\n")
     else:
@@ -2234,41 +2259,87 @@ def _build_day_prompt(turn: Turn, canon: list[dict], born: datetime | None,
     )
 
     parts.append(
-        f"Формат - от одной до {DAY_SCENES_LIMIT} строк, по одной сцене в "
-        "строке. От первого лица, прошедшее время, 1-2 фразы. Без нумерации, "
-        "без markdown, ничего до и после.\n"
+        "Формат - ТОЛЬКО JSON, без пояснений:\n"
+        '{"scenes": ["...", "..."], "opened": ["..."], "closed": [2]}\n'
     )
     parts.append(
-        f"Если день был пустым - ответь одним словом: {DAY_NONE}. Так "
-        "бывает, и это лучше выдуманного: записанное ложится в его "
-        "биографию навсегда.\n"
+        "Про поля:\n"
+        f" - scenes: что было сегодня. От одной до {DAY_SCENES_LIMIT} сцен, "
+        "от первого лица, прошедшее время, 1-2 фразы каждая. Пустой список - "
+        "законный ответ: день бывает пустым, и это лучше выдуманного, потому "
+        "что записанное ложится в его биографию навсегда.\n"
+        " - opened: что СЕГОДНЯ началось и ещё не кончилось - дело, ссора, "
+        "решение, которое он отложил. Одной фразой, его словами. Чаще всего "
+        "пусто: новое начинается не каждый день, а список открытого, куда "
+        "каждый вечер добавляют строку, через месяц перестаёт что-либо "
+        "значить.\n"
+        " - closed: номера того, что сегодня КОНЧИЛОСЬ - доведено, отменено "
+        "или перестало иметь значение. Только из списка выше. Пусто - "
+        "обычное дело.\n"
+    )
+    parts.append(
+        "Открытое, к которому он сегодня возвращался, упоминай в сценах "
+        "прямо: по сценам видно, к чему он вернулся, а к чему нет.\n"
     )
     return "\n".join(parts)
 
 
-def _parse_day(row: str) -> list[str]:
-    """Строки -> список сцен. Пусто — отказ или мусор, для писателя это одно."""
+def _parse_day(row: str, open_ids=None) -> dict:
+    """JSON -> {'scenes': [...], 'opened': [...], 'closed': [id]}.
+
+    Разбор ПРОЩАЮЩИЙ по краям и строгий по существу: битый JSON даёт пустой
+    день (то же, что отказ модели), а вот номера в `closed` сверяются с теми,
+    что были показаны. Модель охотно называет номер, которого не видела, и
+    закрытая по такому номеру нить исчезла бы из жизни персонажа молча.
+    """
+    empty = {"scenes": [], "opened": [], "closed": []}
     text = _strip_fences(row or "").strip()
     if not text:
-        return []
+        return empty
+    # Слово отказа осталось законным ответом, хотя формат теперь JSON: модель,
+    # которой сказано «день был пустым - ответь одним словом», иногда так и
+    # отвечает, и понять её дешевле, чем переспросить.
     if text.lower().lstrip("«\"'").startswith(DAY_NONE):
-        return []
+        return empty
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        logging.warning("день: не разобрал JSON: %s", text[:120])
+        return empty
+    if not isinstance(data, dict):
+        return empty
 
-    out = []
-    for line in text.splitlines():
-        scene = " ".join(line.split()).strip().lstrip("-\u2022*0123456789.) ")
-        scene = scene.strip().strip("«»\"'")
-        if len(scene) < 12:
+    scenes = []
+    for item in (data.get("scenes") or [])[:DAY_SCENES_LIMIT]:
+        scene = " ".join(str(item).split()).strip().strip("«»\"'")
+        if len(scene) >= 12:
+            scenes.append(clip_text(scene))
+
+    opened = []
+    for item in (data.get("opened") or [])[:THREADS_OPENED_LIMIT]:
+        line = " ".join(str(item).split()).strip().strip("«»\"'")
+        if len(line) >= 8:
+            opened.append(clip_text(line, THREAD_TEXT_LIMIT))
+
+    allowed = {int(t["id"]) for t in (open_ids or [])}
+    closed = []
+    for item in (data.get("closed") or []):
+        try:
+            num = int(item)
+        except (TypeError, ValueError):
             continue
-        out.append(clip_text(scene))
-        if len(out) >= DAY_SCENES_LIMIT:
-            break
-    return out
+        if num in allowed:
+            closed.append(num)
+        else:
+            logging.warning("день: закрыть просят нить %s, которой не показывали",
+                            item)
+
+    return {"scenes": scenes, "opened": opened, "closed": closed}
 
 
 def day(turn: Turn, canon: list[dict], born: datetime | None,
         age_now: int | None, client, now=None, weather: str | None = None,
-        yesterday: str | None = None) -> list[str]:
+        yesterday: str | None = None, threads: list[dict] | None = None) -> dict:
     """Что было сегодня. Пустой список - обычный исход.
 
     Модель ТЯЖЁЛАЯ, как у сна: здесь сочиняют, а не вычитывают из сказанного.
@@ -2276,7 +2347,7 @@ def day(turn: Turn, canon: list[dict], born: datetime | None,
     такой день не отличить от чужого - то есть он не биография.
     """
     prompt = _build_day_prompt(turn, canon, born, age_now, now, weather,
-                               yesterday)
+                               yesterday, threads)
     try:
         response = client.chat.completions.create(
             model=config.DEEPSEEK_MODEL,
@@ -2284,8 +2355,8 @@ def day(turn: Turn, canon: list[dict], born: datetime | None,
         )
     except OpenAIError as err:
         logging.warning("день: запрос упал: %s", err)
-        return []
-    return _parse_day(response.choices[0].message.content or "")
+        return {"scenes": [], "opened": [], "closed": []}
+    return _parse_day(response.choices[0].message.content or "", threads)
 
 
 def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
@@ -2331,6 +2402,12 @@ def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
     if turn.objects:
         residue.append("\n".join(f"- {_render_object(o, now)}"
                                  for o in turn.objects))
+    # Нити (Шаг 47) — в дневной остаток, а не отдельным блоком: голова занята
+    # незакрытым ровно так же, как занята недавним разговором, и разделять их
+    # значило бы сказать сну, что одно важнее другого.
+    if turn.threads:
+        residue.append("\n".join(f"- не закончено: {t['text']}"
+                                 for t in turn.threads))
     if residue:
         parts.append("Дневной остаток - чем была занята голова:\n"
                      + "\n".join(residue) + "\n")
