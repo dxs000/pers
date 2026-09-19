@@ -545,7 +545,7 @@ def _fill_fixture(conn, state: dict) -> None:
     # `messages`, обязана быть названа тут поимённо, иначе изоляция сценариев
     # через неё течёт.
     conn.execute("TRUNCATE objects, assertions, episodes, aliases, sessions, "
-                 "messages, impulses, memories RESTART IDENTITY CASCADE") 
+                 "messages, impulses, memories, promises RESTART IDENTITY CASCADE") 
     
     conn.execute(
         """

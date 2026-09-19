@@ -507,8 +507,13 @@ def promise_tick(eng, edges: Edges, now: datetime, *,
         return None
 
     promise = dict(row)
-    late_hours = max((now - promise["due_at"]).total_seconds() / 3600.0, 0.0)
     attempt = (promise["repeats"] or 0) + 1
+    # Опоздание считается ТОЛЬКО для первой попытки. На повторе `due_at`
+    # отстоит на `PROMISE_REPEAT_HOURS` по устройству, и та же арифметика
+    # выдавала бы «ты опоздал на час» там, где персонаж напомнил вовремя и
+    # повторяет по плану. Извиняться за это — врать в другую сторону.
+    late_hours = (max((now - promise["due_at"]).total_seconds() / 3600.0, 0.0)
+                  if attempt == 1 else 0.0)
 
     tz = tz or config.TZ
     place = eng.place()
