@@ -16,7 +16,7 @@ from mind import (VERDICT_WRITE, build_system_prompt, check_memory,
                   decide_query, dream, dream_subject, extract_memories,
                   extract_objects, linger, notice_promise, propose_birthplaces,
                   propose_names, reflect_mood, reflect_self, reflect_traits,
-                  say_promise, speak_first, weather_family)
+                  day, say_promise, speak_first, weather_family)
 from snapshot import SESSION_GAP_HOURS, clip_text, iso
 from openai import OpenAI, OpenAIError
 
@@ -423,6 +423,110 @@ def sense_impulses(eng, now: datetime, wx) -> list[Urge]:
                             expires_at=now + timedelta(hours=WEATHER_TTL_HOURS)))
 
     return out
+
+
+# =============================================================================
+# День (Шаг 46): что было, пока никто не смотрел
+# =============================================================================
+# **Отдельный заход, а не ветка сна**, хотя оба пишут без собеседника и оба
+# ходят к модели. Дела разные и, главное, времена разные: сон случается ночью,
+# день подводится вечером, и слитые в один они дрались бы за один заход.
+#
+# **Вечер считается по ЧАСАМ, а не по свету** — и это единственное осознанное
+# расхождение с заслонками сна. У сна свет верен по существу: сон про темноту,
+# и в белые ночи ему честнее не сниться вовсе. Конец дня темнотой не
+# определяется: в июне в высоких широтах вечера в смысле света нет, а день
+# всё равно кончается. Часы работают везде одинаково, и это тот случай, когда
+# простое правило вернее точного.
+#
+# Заслонок три, и они те же по природе, что у сна:
+#   вечер       — день подводят, когда он кончился. Днём проход писал бы
+#                 утро как целые сутки;
+#   тишина      — если собеседник рядом, день ещё не кончился. Порог тот же
+#                 час, что у сна: час без реплик — уже не разговор;
+#   раз в сутки — запись необратима. Два вечера за один вечер не «подробный
+#                 день», а вдвое быстрее исписанная жизнь.
+DAY_HOUR_FROM = 20          # с восьми вечера по его месту
+DAY_HOUR_TO = 24            # до полуночи; после — уже ночь и уже сон
+DAY_QUIET_HOURS = 1.0       # столько никто не пишет — считаем, что он один
+DAY_INTERVAL_HOURS = 20.0   # не чаще; сутки минус запас на сдвиг вечера
+
+
+def day_tick(eng, edges: Edges, now: datetime, *, tz=None) -> list[str] | None:
+    """Один вечерний заход. `None` — не время; `[]` — день был пустым.
+
+    Различие между `None` и `[]` здесь значимое, в отличие от большинства
+    проходов: пустой день — это состоявшаяся работа (модель спрошена, ответ
+    «ничего»), и заслонка «раз в сутки» обязана его учесть. Слей мы их, и
+    пустой вечер приводил бы к повторному вызову модели каждые пять секунд до
+    полуночи.
+    """
+    tz = tz or config.TZ
+    local = now.astimezone(tz)
+    if not (DAY_HOUR_FROM <= local.hour < DAY_HOUR_TO):
+        return None
+
+    stamps = [t for t in (eng.last_exchange(), eng.last_utterance()) if t]
+    if stamps:
+        idle = (now - max(stamps)).total_seconds() / 3600.0
+        if 0.0 <= idle < DAY_QUIET_HOURS:
+            return None
+
+    # Заслонка стоит на МЕТКЕ, а не на последней записи: пустой день записи не
+    # оставляет, и держать на ней суточный интервал значило бы звать модель
+    # каждые несколько секунд до полуночи - ровно в тот вечер, когда персонажу
+    # нечего сказать.
+    settled = eng.day_at()
+    if settled is not None:
+        hours = (now - settled).total_seconds() / 3600.0
+        if 0.0 <= hours < DAY_INTERVAL_HOURS:
+            return None
+
+    previous = eng.last_lived()
+
+    # Снимок и канон - после заслонок, как у сна и у модели в фоновом заходе.
+    turn = eng.snapshot(now)
+    born = timeutil.parse_ts(turn.born_at or "")
+    age_now = timeutil.age_years(born, now)
+    if born is None or age_now is None:
+        return None
+
+    # Погода берётся из ЛАТЧА, а не из сети. Вечерний заход не должен зависеть
+    # от чужого сервиса: не ответил - день всё равно был. Латч при этом пишет
+    # фоновый заход, который ходит в сеть по своему расписанию, так что свежее
+    # значение тут почти всегда есть, а почти всегда - достаточно для антуража.
+    weather = (eng.outside_latch() or {}).get("weather")
+
+    canon = eng.all_memories()
+    scenes = day(turn, canon, born, age_now, edges.llm,
+                 now=local, weather=weather,
+                 yesterday=previous["text"] if previous else None)
+
+    # Ворота сверки - те же, что у биографа и у вспомненного во сне. Прожитое
+    # МОЖЕТ противоречить канону (в отличие от приснившегося), и ложится оно
+    # навсегда.
+    written = []
+    for scene in scenes:
+        verdict = check_memory(
+            {"text": scene, "precision": "day", "happened_at": iso(now)},
+            canon, born, edges.llm)
+        logging.info("день, сверка: %s — %s", verdict, scene[:60])
+        if verdict == VERDICT_WRITE:
+            written.append(scene)
+
+    with eng.unit():
+        for scene in written:
+            eng.add_memory(now, "day", scene, "lived", now=now)
+        # Метка двигается ВСЕГДА, в том числе после пустого дня и после сцен,
+        # отвергнутых сверкой. Тот же приём, что у `traits_at` (Шаг 42):
+        # неудача - не повод повторять её через пять секунд на тех же входах.
+        eng.set_day_at(now)
+    if not written:
+        logging.info("день: записывать нечего")
+
+    for scene in written:
+        logging.info("прожито: %s", scene[:80])
+    return written
 
 
 # =============================================================================

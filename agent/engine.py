@@ -64,6 +64,18 @@ class PgEngine:
     def touch_recall(self, memories, now: datetime) -> None:
         self._pg.touch_recall(self.conn, memories, now)
 
+    # --- День (Шаг 46) -------------------------------------------------------
+    def last_lived(self):
+        return self._pg.last_lived(self.conn)
+
+    def day_at(self):
+        row = self.conn.execute(
+            "SELECT day_at FROM agent WHERE id = 1").fetchone()
+        return row["day_at"] if row else None
+
+    def set_day_at(self, now: datetime) -> None:
+        self.conn.execute("UPDATE agent SET day_at = %s WHERE id = 1", (now,))
+
     def last_dream_at(self):
         return self._pg.last_dream_at(self.conn)
 

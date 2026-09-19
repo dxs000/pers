@@ -480,6 +480,26 @@ def memories_since(conn, at) -> int:
     ).fetchone()["n"]
 
 
+def last_lived(conn):
+    """Последняя прожитая сцена: когда записана и что в ней (Шаг 46).
+
+    Два поля одним запросом, потому что оба нужны одному вызывающему и оба
+    берутся из одной строки: `created_at` отвечает заслонке «не чаще раза в
+    сутки», текст — промпту («чем кончился прошлый день»).
+
+    `created_at`, а не `happened_at`, по тому же доводу, что у `last_dream_at`:
+    вопрос «давно ли он записывал день» — про ось записи. У прожитого они
+    совпадают, как совпадают у сна, и совпадение так же держится на том, что
+    писатель один.
+    """
+    return conn.execute(
+        """
+        SELECT created_at, text FROM memories
+         WHERE source = 'lived' ORDER BY created_at DESC LIMIT 1
+        """
+    ).fetchone()
+
+
 def last_dream_at(conn):
     """Когда снилось в последний раз. `None` — не снилось ни разу.
 
@@ -586,7 +606,7 @@ def _fill_fixture(conn, state: dict) -> None:
         UPDATE agent SET name=%s, born_at=%s, birthplace=%s, traits=%s, mood=%s,
                place_label=%s, place_lat=%s, place_lon=%s, outside_latch=%s,
                last_exchange_ts=%s, last_search_ts=NULL, traits_at=%s,
-               mood_reason=%s, mood_since=%s
+               mood_reason=%s, mood_since=%s, day_at=NULL
          WHERE id = 1
         """,
         (

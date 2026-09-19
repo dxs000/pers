@@ -214,6 +214,14 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
             return
     except Exception as err:
         logging.warning("напоминание не удалось: %s", err)
+    # День (Шаг 46) — до сна. Окна у них не пересекаются (вечер против ночи),
+    # так что порядок ни на что не влияет сегодня; он выбран по смыслу: сон
+    # берёт дневной остаток, а день к этому моменту уже подведён.
+    try:
+        if cycle.day_tick(eng, edges, now) is not None:
+            return
+    except Exception as err:
+        logging.warning("день не подведён: %s", err)
     try:
         if cycle.dream_tick(eng, edges, now) is not None:
             return
