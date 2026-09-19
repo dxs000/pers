@@ -13,3 +13,6 @@ agent/__pycache__/
 
 
 agent/fixture_state.json
+
+agent/library/
+agent/library/*
