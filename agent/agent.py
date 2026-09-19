@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 import config
 import cycle
+import library
 import engine as engine_mod
 import outside
 import sky
@@ -108,6 +109,50 @@ def resolve_place(eng, edges: cycle.Edges, now: datetime) -> bool:
         eng.save_place(place)
     check_timezone(found.get("timezone"), now)
     return True
+
+
+def sync_shelf(eng) -> None:
+    """Свести полку с каталогом при подъёме (Шаг 48).
+
+    При подъёме, а не по расписанию: книги на полке появляются РУКАМИ —
+    человек кладёт файл и зовёт `convert.py`, — и заметить это в ту же минуту
+    незачем. Демон поднимается чаще, чем пополняется библиотека.
+
+    Исключение не выпускается наружу по тому же правилу, что у `idle_tick`:
+    сломанная полка не повод не запускать разговор. Персонаж, у которого нет
+    каталога, просто не читает.
+    """
+    try:
+        shelf = library.catalog()
+    except Exception as err:
+        logging.warning("полка недоступна: %s", err)
+        return
+    if not shelf:
+        logging.info("полка пуста: %s", config.LIBRARY_DIR)
+        return
+    try:
+        with eng.unit():
+            got = eng.sync_books(shelf)
+    except Exception as err:
+        logging.warning("полка не свелась с каталогом: %s", err)
+        return
+
+    logging.info("полка: %s книг, из них новых %s",
+                 len(shelf), len(got["added"]))
+    for path in got["added"]:
+        logging.info("на полке появилось: %s", path)
+    for path in got["removed"]:
+        logging.info("с полки убрано: %s", path)
+    for path in got["missing"]:
+        # Взятая книга пропала с полки. Строку не трогаем — к ней привязаны
+        # порции и заметки, — но читать её нечем, и сказать об этом надо
+        # громко: иначе чтение молча перестанет происходить.
+        logging.warning("книга пропала, а он её читает: %s", path)
+    for bad in got["conflicts"]:
+        logging.warning(
+            "книгу перегнали, пока он её читал: %s — было %s знаков, стало %s. "
+            "Позиция чтения указывает не туда; строка не тронута",
+            bad["text_path"], bad["was"], bad["now"])
 
 
 def finish_session(eng, now: datetime, edges: cycle.Edges) -> dict | None:
@@ -422,6 +467,7 @@ def main() -> int:
         edges.close()
         return 1
     logging.info("хранилище: %s", eng.name)
+    sync_shelf(eng)
     boot = datetime.now(timezone.utc)
     resolve_place(eng, edges, boot)
     if eng.session_stale(boot):

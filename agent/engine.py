@@ -83,6 +83,50 @@ class PgEngine:
     def all_threads(self) -> list[dict]:
         return self._pg.all_threads(self.conn)
 
+    # --- Чтение (Шаг 48) -----------------------------------------------------
+    # Каталог приезжает ПАРАМЕТРОМ, а не читается здесь. Фасад не знает про
+    # файловую систему по тому же правилу, по которому он не знает про сеть:
+    # погоду приносит `outside`, полку — `library`, а хранилище хранит.
+    def sync_books(self, shelf: list[dict]) -> dict:
+        return self._pg.sync_books(self.conn, shelf)
+
+    def current_book(self):
+        return self._pg.current_book(self.conn)
+
+    def shelf_state(self) -> dict:
+        return self._pg.shelf_state(self.conn)
+
+    def pick_book(self, text_path: str, why: str, now: datetime):
+        return self._pg.pick_book(self.conn, text_path, why, now)
+
+    def advance_reading(self, book_id: int, from_pos: int, to_pos: int,
+                        conspectus: str | None, now: datetime):
+        return self._pg.advance_reading(self.conn, book_id, from_pos, to_pos,
+                                        conspectus, now)
+
+    def conspectus_so_far(self, book_id: int, limit: int) -> list[str]:
+        return self._pg.conspectus_so_far(self.conn, book_id, limit)
+
+    def add_note(self, book_id: int, reading_id, text: str, now: datetime,
+                 at_pos: int | None = None) -> int:
+        return self._pg.add_note(self.conn, book_id, reading_id, text, now,
+                                 at_pos)
+
+    def untold_notes(self, limit: int | None = None) -> list[dict]:
+        return self._pg.untold_notes(self.conn, limit)
+
+    def mark_notes_told(self, ids, now: datetime) -> int:
+        return self._pg.mark_notes_told(self.conn, ids, now)
+
+    def notes_between(self, since, until) -> list[dict]:
+        return self._pg.notes_between(self.conn, since, until)
+
+    def close_book(self, book_id: int, now: datetime, why: str):
+        return self._pg.close_book(self.conn, book_id, now, why)
+
+    def all_books(self) -> list[dict]:
+        return self._pg.all_books(self.conn)
+
     # --- День (Шаг 46) -------------------------------------------------------
     def last_lived(self):
         return self._pg.last_lived(self.conn)

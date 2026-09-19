@@ -278,6 +278,7 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
         self_assertions=by_object.get(SELF_ID, []),
         outside_latch=agent.get("outside_latch"),
         threads=open_threads(conn, "self", THREADS_SNAPSHOT_LIMIT),
+        reading=current_reading(conn),
         episodes=[
             {
                 "id": f"ep_{e['id']}",
@@ -603,6 +604,332 @@ def last_lived(conn):
     ).fetchone()
 
 
+# =============================================================================
+# Чтение (Шаг 48)
+# =============================================================================
+# Хранилище НЕ знает про файлы. Каталог приезжает параметром — его собирает
+# `library.catalog()`, край над файловой системой, — а здесь только строки.
+# То же разделение, что у погоды: `outside` добывает, `store` хранит, и знать
+# друг о друге им незачем.
+
+
+def sync_books(conn, shelf: list[dict]) -> dict:
+    """Свести полку с таблицей. Возвращает, что произошло.
+
+    Три исхода, и различать их обязательно.
+
+    **Новое заводится.** Обычный случай: положили файл, сконвертировали.
+
+    **Пропавшее НЕ ТРОГАЕТСЯ, если книгу брали.** Строка взятой книги — часть
+    биографии: к ней привязаны порции и заметки, и снести её значило бы
+    стереть месяц чтения из-за того, что файл переименовали. Пропавшее
+    невзятое, наоборот, удаляется без сожаления: невзятая строка — чистый
+    каталог, за ней ничего не стоит.
+
+    **Изменившаяся длина — конфликт, а не обновление.** Перегнанная книга
+    почти наверняка другой длины, и записанная позиция после этого указывает
+    не туда. У невзятой это безразлично (позиция ноль), и длина просто
+    обновляется. У взятой — нет: молчаливая правка сдвинула бы чтение на
+    произвольное число страниц, а `CHECK (position <= length)` вдобавок уронил
+    бы транзакцию посреди сверки. Поэтому такая книга остаётся как есть, а
+    решение принимает человек: он эту книгу и перегнал.
+    """
+    paths = [b["text_path"] for b in shelf]
+    known = {
+        r["text_path"]: r
+        for r in conn.execute(
+            "SELECT text_path, length, picked_at FROM books").fetchall()
+    }
+
+    added, updated, conflicts = [], [], []
+    for book in shelf:
+        row = known.get(book["text_path"])
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO books (text_path, source_path, source_kind,
+                                   title, author, length, quality)
+                VALUES (%(text_path)s, %(source_path)s, %(source_kind)s,
+                        %(title)s, %(author)s, %(length)s, %(quality)s)
+                """,
+                {**book, "quality": json.dumps(book.get("quality") or {},
+                                               ensure_ascii=False)},
+            )
+            added.append(book["text_path"])
+            continue
+        if row["length"] != book["length"] and row["picked_at"] is not None:
+            conflicts.append({"text_path": book["text_path"],
+                              "was": row["length"], "now": book["length"]})
+            continue
+        changed = conn.execute(
+            """
+            UPDATE books
+               SET title = %(title)s, author = %(author)s,
+                   source_path = %(source_path)s, source_kind = %(source_kind)s,
+                   length = %(length)s, quality = %(quality)s
+             WHERE text_path = %(text_path)s
+               AND (title, author, length, source_path) IS DISTINCT FROM
+                   (%(title)s, %(author)s, %(length)s, %(source_path)s)
+            RETURNING text_path
+            """,
+            {**book, "quality": json.dumps(book.get("quality") or {},
+                                           ensure_ascii=False)},
+        ).fetchone()
+        if changed:
+            updated.append(book["text_path"])
+
+    # **Пустая полка НИЧЕГО не удаляет.** `<> ALL('{}')` истинно для всех
+    # строк, то есть буквальное исполнение правила снесло бы каталог целиком —
+    # и снесло бы ровно в том случае, который чаще всего означает не «книг не
+    # стало», а «каталог не примонтировался». Отказ от уборки стоит одной
+    # лишней строки в таблице; уборка по ошибке стоит полки.
+    gone = []
+    if paths:
+        gone = conn.execute(
+            "DELETE FROM books WHERE picked_at IS NULL "
+            " AND text_path <> ALL(%s) RETURNING text_path",
+            (paths,),
+        ).fetchall()
+    on_shelf = set(paths)
+    missing = [path for path, row in known.items()
+               if path not in on_shelf and row["picked_at"] is not None]
+    return {"added": added, "updated": updated, "conflicts": conflicts,
+            "removed": [r["text_path"] for r in gone], "missing": missing}
+
+
+def current_book(conn):
+    """Книга на руках. `None` — не читает ничего.
+
+    Открытая ровно одна, и держит это `books_one_open_uq`, а не запрос:
+    `LIMIT 1` здесь был бы заметанием второй строки под ковёр.
+    """
+    return conn.execute(
+        """
+        SELECT id, text_path, title, author, length, position,
+               picked_at, picked_why, read_at
+          FROM books
+         WHERE picked_at IS NOT NULL AND closed_at IS NULL
+        """
+    ).fetchone()
+
+
+def current_reading(conn) -> dict | None:
+    """То, что о книге помнит сам персонаж. Для снимка.
+
+    Позиции в символах здесь нет намеренно: это мера хранилища, а не память
+    человека. Наружу — доля и последняя своя мысль, то есть ровно то, чем
+    книга присутствует в голове между заходами.
+    """
+    row = current_book(conn)
+    if row is None:
+        return None
+    note = conn.execute(
+        "SELECT text FROM notes WHERE book_id = %s ORDER BY at DESC, id DESC "
+        "LIMIT 1",
+        (row["id"],),
+    ).fetchone()
+    length = row["length"] or 1
+    return {
+        "title": row["title"],
+        "author": row["author"],
+        "progress": round(row["position"] / length, 4),
+        "started": iso(row["picked_at"]),
+        "note": note["text"] if note else None,
+    }
+
+
+def shelf_state(conn) -> dict:
+    """Что можно взять и что уже было. Вход прохода выбора.
+
+    Прочитанное подаётся вместе с непрочитанным, и это не удобство: проход,
+    видящий только свободные книги, второй раз берётся за брошенное и не
+    может сказать, почему взял именно эту.
+    """
+    free = conn.execute(
+        """
+        SELECT id, text_path, title, author, length
+          FROM books WHERE picked_at IS NULL ORDER BY id
+        """
+    ).fetchall()
+    past = conn.execute(
+        """
+        SELECT title, author, closed_why, closed_at
+          FROM books WHERE closed_at IS NOT NULL ORDER BY closed_at DESC
+        """
+    ).fetchall()
+    return {
+        "free": [dict(r) for r in free],
+        "past": [{"title": r["title"], "author": r["author"],
+                  "why": r["closed_why"], "at": iso(r["closed_at"])}
+                 for r in past],
+    }
+
+
+def pick_book(conn, text_path: str, why: str, now):
+    """Взять книгу. `None` — не вышло, и ничего не тронуто.
+
+    Защита УСЛОВНЫМ `UPDATE`, а не проверкой перед ним, по тому же доводу, что
+    у `record_birth`: «посмотреть, не читает ли он что-то, и взять» — это
+    check-then-act, и вторая открытая книга разошлась бы с уникальным
+    индексом уже внутри транзакции. Условие живёт в `WHERE`, решает база.
+    """
+    return conn.execute(
+        """
+        UPDATE books SET picked_at = %(now)s, picked_why = %(why)s
+         WHERE text_path = %(path)s
+           AND picked_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM books
+                            WHERE picked_at IS NOT NULL AND closed_at IS NULL)
+        RETURNING id, text_path, title, author, length, position
+        """,
+        {"now": now, "why": why.strip(), "path": text_path},
+    ).fetchone()
+
+
+def advance_reading(conn, book_id: int, from_pos: int, to_pos: int,
+                    conspectus: str | None, now) -> int | None:
+    """Записать порцию и сдвинуть позицию. `None` — позиция уже не та.
+
+    Сдвиг условный (`WHERE position = %(from_pos)s`), и это не перестраховка.
+    Между тем, как проход взял порцию, и тем, как он её записывает, лежит
+    вызов модели — то есть минуты. Транзакция столько не живёт (правило,
+    по которому Шаг 28 снял `FOR UPDATE SKIP LOCKED` у очереди), и
+    единственная настоящая развязка — условие в `WHERE`.
+
+    Позиция не совпала — значит прочитанное относится к другому месту книги,
+    и записывать его нельзя: конспект лёг бы не к тому куску, а сдвиг
+    перепрыгнул бы через страницы. Всё или ничего.
+    """
+    moved = conn.execute(
+        """
+        UPDATE books SET position = %(to_pos)s, read_at = %(now)s
+         WHERE id = %(id)s AND position = %(from_pos)s AND closed_at IS NULL
+        RETURNING id
+        """,
+        {"id": book_id, "from_pos": from_pos, "to_pos": to_pos, "now": now},
+    ).fetchone()
+    if moved is None:
+        return None
+    return conn.execute(
+        """
+        INSERT INTO readings (book_id, at, from_pos, to_pos, conspectus)
+        VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """,
+        (book_id, now, from_pos, to_pos, conspectus),
+    ).fetchone()["id"]
+
+
+def conspectus_so_far(conn, book_id: int, limit: int) -> list[str]:
+    """Конспекты по порядку чтения, последние `limit`.
+
+    Порядок — чтения, а не записи: перечитывание книги с начала сегодня
+    невозможно, но станет возможным в тот день, когда появится `position`
+    назад, и переворачивать смысл запроса тогда было бы поздно.
+
+    `limit` задаёт вызывающий: сколько прошлого влезает в промпт — вопрос
+    промпта. То же правило, что у `open_threads`.
+    """
+    rows = conn.execute(
+        """
+        SELECT conspectus FROM readings
+         WHERE book_id = %s AND conspectus IS NOT NULL
+         ORDER BY from_pos DESC, id DESC LIMIT %s
+        """,
+        (book_id, limit),
+    ).fetchall()
+    return [r["conspectus"] for r in reversed(rows)]
+
+
+def add_note(conn, book_id: int, reading_id: int | None, text: str,
+             now, at_pos: int | None = None) -> int:
+    """Заметка на полях. В канон НЕ пишет — это делает вечерний проход."""
+    return conn.execute(
+        """
+        INSERT INTO notes (book_id, reading_id, at, at_pos, text)
+        VALUES (%s, %s, %s, %s, %s) RETURNING id
+        """,
+        (book_id, reading_id, now, at_pos, text.strip()),
+    ).fetchone()["id"]
+
+
+def untold_notes(conn, limit: int | None = None) -> list[dict]:
+    """Нерассказанное, свежее сверху. Вход вечернего прохода и заговаривания."""
+    rows = conn.execute(
+        """
+        SELECT n.id, n.text, n.at, n.at_pos, b.title, b.author, b.text_path
+          FROM notes n JOIN books b ON b.id = n.book_id
+         WHERE n.told_at IS NULL
+         ORDER BY n.at DESC, n.id DESC LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+    return [{"id": r["id"], "text": r["text"], "at": iso(r["at"]),
+             "at_pos": r["at_pos"], "title": r["title"], "author": r["author"],
+             "text_path": r["text_path"]} for r in rows]
+
+
+def mark_notes_told(conn, ids, now) -> int:
+    ids = [int(i) for i in ids]
+    if not ids:
+        return 0
+    rows = conn.execute(
+        "UPDATE notes SET told_at = %s WHERE id = ANY(%s) AND told_at IS NULL "
+        "RETURNING id",
+        (now, ids),
+    ).fetchall()
+    return len(rows)
+
+
+def notes_between(conn, since, until) -> list[dict]:
+    """Заметки за окно. Вход вечернего прохода: что он сегодня отметил.
+
+    Окно, а не «нерассказанное»: день подводит ИТОГ ДНЯ, и заметка недельной
+    давности, до которой не дошли руки, в сегодняшнюю сцену не годится.
+    """
+    rows = conn.execute(
+        """
+        SELECT n.id, n.text, n.at, b.title, b.author
+          FROM notes n JOIN books b ON b.id = n.book_id
+         WHERE n.at >= %s AND n.at < %s
+         ORDER BY n.at, n.id
+        """,
+        (since, until),
+    ).fetchall()
+    return [{"id": r["id"], "text": r["text"], "at": iso(r["at"]),
+             "title": r["title"], "author": r["author"]} for r in rows]
+
+
+def close_book(conn, book_id: int, now, why: str):
+    """Закрыть книгу: дочитал или бросил. Строка остаётся (`0011_reading.sql`)."""
+    return conn.execute(
+        """
+        UPDATE books SET closed_at = %s, closed_why = %s
+         WHERE id = %s AND closed_at IS NULL
+        RETURNING id, title, author, position, length
+        """,
+        (now, why, book_id),
+    ).fetchone()
+
+
+def all_books(conn) -> list[dict]:
+    """Вся полка, включая закрытое. Для инспектора и сбруи."""
+    rows = conn.execute(
+        """
+        SELECT b.id, b.text_path, b.title, b.author, b.length, b.position,
+               b.picked_at, b.picked_why, b.read_at, b.closed_at, b.closed_why,
+               count(r.id) AS readings, max(r.to_pos) AS read_to
+          FROM books b LEFT JOIN readings r ON r.book_id = b.id
+         GROUP BY b.id ORDER BY b.id
+        """
+    ).fetchall()
+    return [{"id": r["id"], "text_path": r["text_path"], "title": r["title"],
+             "author": r["author"], "length": r["length"],
+             "position": r["position"], "picked_at": iso(r["picked_at"]),
+             "picked_why": r["picked_why"], "read_at": iso(r["read_at"]),
+             "closed_at": iso(r["closed_at"]), "closed_why": r["closed_why"],
+             "readings": r["readings"]} for r in rows]
+
+
 def last_dream_at(conn):
     """Когда снилось в последний раз. `None` — не снилось ни разу.
 
@@ -681,8 +1008,15 @@ def _fill_fixture(conn, state: dict) -> None:
     # `agent.last_search_ts`). Общее правило: таблица, не связанная ключом с
     # `messages`, обязана быть названа тут поимённо, иначе изоляция сценариев
     # через неё течёт.
+    # `books, readings, notes` дописаны Шагом 48. Перечень поимённый и о
+    # новом не напоминает — ровно тем, чем он уже дважды подвёл
+    # (`last_search_ts`, `traits_at`): забытая таблица переживает сценарий,
+    # и соседний видит её остатки. Полка тут особенно опасна: книга,
+    # оставшаяся открытой от прошлого сценария, делает читающий проход
+    # зависимым от порядка прогона.
     conn.execute("TRUNCATE objects, assertions, episodes, aliases, sessions, "
-                 "messages, impulses, memories, promises, threads "
+                 "messages, impulses, memories, promises, threads, "
+                 "books, readings, notes "
                  "RESTART IDENTITY CASCADE")
 
     conn.execute(
