@@ -366,7 +366,7 @@ def all_memories(conn) -> list[dict]:
 
 
 def add_memory(conn, happened_at, precision: str, text: str, source: str,
-               weight: float = 1.0) -> int:
+               weight: float = 1.0, now=None) -> int:
     """Записать воспоминание. Только INSERT — переписывания не бывает.
 
     Неизменяемость здесь не осторожность, а единственное, что отличает
@@ -377,13 +377,24 @@ def add_memory(conn, happened_at, precision: str, text: str, source: str,
     Отсюда же отсутствие `ON CONFLICT`: сливать воспоминания не по чему.
     Повтор — не конфликт ключа, а вопрос смысла, и отвечает на него сверка
     (`mind.check_memory`) до вызова, а не база после.
+
+    **`now` передаётся, а не берётся из `DEFAULT now()` (Шаг 43.1).** Это было
+    единственное место в проекте, где момент брала база: везде «сейчас» едет
+    параметром от вызывающего — и в фоновых заходах, и в T2, и в обещаниях.
+    Расхождение было незаметным ровно до тех пор, пока никто не спрашивал у
+    таблицы, давно ли это записано; а `last_dream_at` спрашивает, и заслонка
+    «не чаще раза в двадцать часов» сравнивала переданное `now` с часами
+    базы. В бою они совпадают, под сбруёй — расходятся на месяцы, и заслонка
+    сна не закрывалась вовсе. Ось записи теперь приходит оттуда же, откуда
+    ось события.
     """
     return conn.execute(
         """
-        INSERT INTO memories (happened_at, precision, text, source, weight)
-        VALUES (%s, %s, %s, %s, %s) RETURNING id
+        INSERT INTO memories (happened_at, precision, text, source, weight,
+                              created_at)
+        VALUES (%s, %s, %s, %s, %s, coalesce(%s, now())) RETURNING id
         """,
-        (happened_at, precision, text.strip(), source, weight),
+        (happened_at, precision, text.strip(), source, weight, now),
     ).fetchone()["id"]
 
 
@@ -560,9 +571,18 @@ def _fill_fixture(conn, state: dict) -> None:
         -- того, что прогонялось перед ним. Изоляцию сценариев даёт TRUNCATE,
         -- а `agent` он не трогает (строка одна и обязана жить), поэтому
         -- каждое поле здесь названо поимённо.
+        -- `traits_at` сбрасывается здесь по той же причине и той же ценой
+        -- (Шаг 43.1). Колонка появилась на Шаге 42, в этом перечне названа не
+        -- была, и `TRUNCATE` её не трогает — строка `agent` одна и обязана
+        -- жить. В результате метка пересчёта переживала не только сценарий, а
+        -- весь прогон: сценарий `traits` видел водяной знак, оставленный
+        -- соседом, и второй заход, обязанный промолчать, звал модель. Течь
+        -- та же самая, что описана выше про `last_search_ts`, — и повторилась
+        -- она ровно потому, что перечень поимённый: он ничего не забывает
+        -- сам, но и не напоминает о новом.
         UPDATE agent SET name=%s, born_at=%s, birthplace=%s, traits=%s, mood=%s,
                place_label=%s, place_lat=%s, place_lon=%s, outside_latch=%s,
-               last_exchange_ts=%s, last_search_ts=NULL
+               last_exchange_ts=%s, last_search_ts=NULL, traits_at=%s
          WHERE id = 1
         """,
         (
@@ -576,6 +596,7 @@ def _fill_fixture(conn, state: dict) -> None:
             place.get("lon"),
             json.dumps(self.get("outside")) if self.get("outside") else None,
             state.get("last_exchange_ts"),
+            self.get("traits_at"),
         ),
     )
 
@@ -590,11 +611,23 @@ def _fill_fixture(conn, state: dict) -> None:
     for m in state.get("memories", []):
         conn.execute(
             """
-            INSERT INTO memories (happened_at, precision, text, source, weight)
-            VALUES (%s, %s, %s, %s, %s)
+            -- `created_at` приезжает из фикстура, а не берётся `DEFAULT now()`
+            -- (Шаг 43.1). Это вторая ось `memories`: `happened_at` — когда
+            -- случилось, `created_at` — когда записали, и вторая ось у
+            -- фикстура до сих пор была настенными часами машины. Отсюда две
+            -- беды сразу. `memories_since` мерит от неё накопление, и все
+            -- строки фикстура всегда оказывались «новее» любой метки, из-за
+            -- чего заслонка черт не закрывалась никогда. А `recall_score`
+            -- считает от неё затухание — то есть в эталонах, объявленных
+            -- независимыми от часов, сидела величина, зависящая от даты
+            -- прогона; спасало лишь то, что метки у всех строк совпадали и
+            -- порядок держался на весе.
+            INSERT INTO memories (happened_at, precision, text, source, weight,
+                                  created_at)
+            VALUES (%s, %s, %s, %s, %s, coalesce(%s, now()))
             """,
             (m["happened_at"], m["precision"], m["text"], m["source"],
-             m.get("weight", 1.0)),
+             m.get("weight", 1.0), m.get("created_at")),
         )
 
     for oid, o in state.get("objects", {}).items():

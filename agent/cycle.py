@@ -267,7 +267,7 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
             for cand in candidates:
                 eng.upsert_object(cand, now)
             for happened_at, precision, text in remembered:
-                eng.add_memory(happened_at, precision, text, "told")
+                eng.add_memory(happened_at, precision, text, "told", now=now)
             if promised:
                 due_at, what = promised
                 eng.add_promise(due_at, what, pair.get("asked_id"),
@@ -735,10 +735,11 @@ def dream_tick(eng, edges: Edges, now: datetime, *, tz=None) -> str | None:
         # Сон датируется сегодняшней ночью и точностью до дня: он и правда
         # случился в этот день, и это единственное воспоминание, у которого
         # дата известна безусловно.
-        eng.add_memory(now, "day", seen["dream"], "dream", DREAM_WEIGHT)
+        eng.add_memory(now, "day", seen["dream"], "dream", DREAM_WEIGHT,
+                       now=now)
         if recalled and verdict == VERDICT_WRITE:
             eng.add_memory(happened_at, recalled["precision"],
-                           recalled["text"], "inferred")
+                           recalled["text"], "inferred", now=now)
         eng.record_urge("dream", dream_subject(seen["dream"]), DREAM_URGE, now,
                         now + timedelta(hours=DREAM_TTL_HOURS))
 

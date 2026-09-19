@@ -56,9 +56,9 @@ class PgEngine:
         return self._pg.all_memories(self.conn)
 
     def add_memory(self, happened_at, precision: str, text: str, source: str,
-                   weight: float = 1.0) -> int:
+                   weight: float = 1.0, now: datetime | None = None) -> int:
         return self._pg.add_memory(self.conn, happened_at, precision, text,
-                                   source, weight)
+                                   source, weight, now)
 
     # --- Сон и вспоминание (Шаг 40) -----------------------------------------
     def touch_recall(self, memories, now: datetime) -> None:
