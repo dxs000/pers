@@ -160,6 +160,18 @@ class PgEngine:
         self._pg.record_urge(self.conn, kind, subject, amount, now,
                              expires_at=expires_at)
 
+    # --- Годовщины (Шаг 45) --------------------------------------------------
+    def born_at(self):
+        return self._pg.born_at(self.conn)
+
+    def memories_on(self, month: int, day: int) -> list[dict]:
+        return self._pg.memories_on(self.conn, month, day)
+
+    def note_anniversary(self, subject: str, amount: float, now: datetime,
+                         expires_at, within_hours: float) -> bool:
+        return self._pg.note_anniversary(self.conn, subject, amount, now,
+                                         expires_at, within_hours)
+
     def strongest_impulse(self, now: datetime, floor: float):
         return self._pg.strongest_impulse(self.conn, now, floor)
 

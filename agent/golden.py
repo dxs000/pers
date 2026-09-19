@@ -81,7 +81,7 @@ import difflib
 import json
 from dataclasses import asdict, dataclass
 import sys
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -759,6 +759,13 @@ _INSPECT = {"inspector": None}
 # нет намеренно — см. `_run_http`.
 _HTTP = {"http": None}
 
+# Пятнадцатое семейство: годовщины (Шаг 45). Единственный сценарий в проекте,
+# где модель не зовётся НИ РАЗУ, и это не бедность, а утверждение: повод,
+# приносимый календарём, не стоит ни вызова, ни запроса в сеть. Стоит отдельно
+# от инициативы, потому что та проверяет, как поводы конкурируют, а этот — как
+# повод НЕ заводится второй раз за день.
+_ANNIVERSARY = {"anniversary": None}
+
 # Четырнадцатое семейство: настроение (Шаг 44). Отдельно от `writes`, хотя
 # тоже про запись в `agent`: там сверяется СНИМОК после слияния, а здесь
 # сверять надо несмену — то, что в снимке выглядит как бездействие. Отличить
@@ -776,7 +783,7 @@ _MOOD = {"mood": None}
 _PROMISES = {"promises": None}
 
 SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
-             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_TRAITS, **_PROMISES, **_MOOD,
+             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY,
              **_BIRTH, **_INSPECT, **_HTTP, **_GENESIS}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
@@ -1728,6 +1735,81 @@ def _run_curiosity() -> str:
     )
 
 
+# --- Сценарий ГОДОВЩИН (Шаг 45) ---------------------------------------------
+# Пятнадцатое семейство. Заходов четыре, и ни один не лишний: пустой день,
+# годовщина из канона, наступление дня рождения ПО МЕСТУ и повтор в тот же
+# местный день.
+#
+# Третий и четвёртый стоят парой и проверяют то, ради чего у годовщин отдельный
+# писатель. Канун в 21:00 UTC — это уже час ночи в Тбилиси, то есть день
+# рождения наступил; следующий заход через двенадцать часов — тот же местный
+# день, и повод завестись не должен. Возьми годовщина `record_urge`, оба захода
+# прибавили бы силы, а за сутки таких заходов тысячи.
+ANNIV_PLAIN = NOW                                                  # 15 января
+ANNIV_MEMORY = datetime(2026, 3, 14, 9, 0, tzinfo=timezone.utc)    # 14 марта
+ANNIV_EVE = datetime(2026, 6, 10, 21, 0, tzinfo=timezone.utc)      # 01:00 11-го
+ANNIV_DAY = datetime(2026, 6, 11, 9, 0, tzinfo=timezone.utc)       # 13:00 11-го
+
+
+def _run_anniversary() -> str:
+    """Календарь приносит повод: без модели и без сети.
+
+    Артефактов пять, и каждый закрывает свой стык:
+
+    - **четыре захода** — пусто, годовщина канона, день рождения, повтор.
+      Одним заходом «завелось» неотличимо от «заводится каждый раз»;
+    - **местная дата** — рядом с UTC. Канун в 21:00 по серверу есть час ночи
+      по месту, и годовщина обязана считаться от второго. Без этой строки
+      подмена пояса выглядела бы исправной работой;
+    - **срок годности** — полночь следующих местных суток, а не «плюс сутки».
+      Повод, доживший до завтра, говорил бы «сегодня» про вчера;
+    - **импульсы после** — две строки рядом с прочими поводами, и порядок
+      между ними задан силой: свой день рождения весомее чужой даты;
+    - **ремарка инициативы** — то, что персонаж прочтёт. `IMPULSE_REASONS`
+      для этого рода лежал ненужным с Шага 35 и был переписан этим шагом:
+      прежняя строка обещала общее воспоминание, которого у годовщин нет.
+    """
+    eng = open_engine()
+
+    steps = []
+    for at, title in [(ANNIV_PLAIN, "обычный день"),
+                      (ANNIV_MEMORY, "годовщина из канона"),
+                      (ANNIV_EVE, "канун дня рождения по серверу"),
+                      (ANNIV_DAY, "тот же местный день, +12 ч")]:
+        sensed = cycle.sense_anniversaries(eng, at, TZ)
+        written = []
+        for u in sensed:
+            with eng.unit():
+                written.append(eng.note_anniversary(
+                    u.subject, u.amount, at, u.expires_at,
+                    cycle.ANNIVERSARY_ONCE_HOURS))
+        steps.append(
+            f"{title}\n"
+            f"  UTC {iso(at)} -> по месту {at.astimezone(TZ).date()}\n"
+            f"  почувствовано: {[u.subject for u in sensed]}\n"
+            f"  записано: {written}\n"
+            f"  срок годности: "
+            f"{iso(sensed[0].expires_at) if sensed else '—'}")
+
+    picked = eng.strongest_impulse(ANNIV_DAY, cycle.IMPULSE_FLOOR)
+
+    return (
+        "\n".join(steps)
+        + f"\n{'=' * 60}\n"
+        f"силы: день рождения {cycle.BIRTHDAY_URGE}, прочее "
+        f"{cycle.ANNIVERSARY_URGE}, порог {cycle.IMPULSE_FLOOR}\n"
+        f"не заводим повторно {cycle.ANNIVERSARY_ONCE_HOURS} ч\n"
+        f"{'=' * 60}\n"
+        f"{_dump_impulses(eng)}\n"
+        f"{'=' * 60}\n"
+        f"вызовов модели: 0 — повод приносит календарь\n"
+        f"{'=' * 60}\n"
+        f"самый сильный на 11 июня: {picked['kind'] if picked else '—'}\n"
+        f"РЕМАРКА ИНИЦИАТИВЫ на этом поводе:\n"
+        f"{mind.render_initiative(dict(picked) if picked else None)}"
+    )
+
+
 # --- Сценарий НАСТРОЕНИЯ (Шаг 44) -------------------------------------------
 # Четырнадцатое семейство. Единственный проход, чей ОБЫЧНЫЙ исход — ничего не
 # делать, и до Шага 44 такого исхода у него не было вовсе: спрошенный «каким
@@ -2621,6 +2703,8 @@ def render(name: str) -> str:
         return _run_promises()
     if name == "mood":
         return _run_mood()
+    if name == "anniversary":
+        return _run_anniversary()
     if name == "initiative":
         return _run_initiative()
     if name == "http":

@@ -1103,6 +1103,88 @@ def record_urge(conn, kind: str, subject: str | None, amount: float, now,
     )
 
 
+def born_at(conn):
+    """Дата рождения, узким запросом. `None` — ещё не родился.
+
+    Отдельно от снимка по тому же доводу, что `outside_latch` (Шаг 37):
+    фоновому заходу нужно одно поле, а `build_snapshot` собирает ради него всю
+    память шестью запросами.
+    """
+    row = conn.execute("SELECT born_at FROM agent WHERE id = 1").fetchone()
+    return row["born_at"] if row else None
+
+
+def memories_on(conn, month: int, day: int) -> list[dict]:
+    """Воспоминания, случившиеся в этот день календаря. Только `precision='day'`.
+
+    **Дата сравнивается как есть, без перевода в местный пояс, и это не
+    упрощение.** У `precision='day'` метка — не момент, а КАЛЕНДАРНАЯ ДАТА:
+    «14 марта 2011-го», записанная полуночью. Перевести её в другой пояс
+    значило бы сдвинуть саму дату на сутки — то есть испортить то
+    единственное, что в ней есть. Местным при этом остаётся «сегодня»
+    (вызывающий считает его по месту персонажа), и в этом нет противоречия:
+    сегодня — момент, годовщина — дата.
+
+    Грубее `day` ничего не годится: у `month`, `year` и `era` дня нет, и
+    годовщину им назначить не из чего.
+
+    Индекса под это нет и не заводится — тот же довод, что у
+    `memories_since`: канон измеряется сотнями строк, и последовательный
+    проход дешевле поддержания индекса по выражению.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, happened_at, text
+          FROM memories
+         WHERE precision = 'day'
+           AND EXTRACT(MONTH FROM happened_at) = %s
+           AND EXTRACT(DAY   FROM happened_at) = %s
+         ORDER BY happened_at
+        """,
+        (month, day),
+    ).fetchall()
+    return [{"id": r["id"], "happened_at": r["happened_at"], "text": r["text"]}
+            for r in rows]
+
+
+def note_anniversary(conn, subject: str, amount: float, now, expires_at,
+                     within_hours: float) -> bool:
+    """Завести повод-годовщину, если за `within_hours` такого ещё не заводили.
+
+    **Отдельно от `record_urge`, и это несущее решение шага.** Накопление там
+    устроено под СОБЫТИЯ: случилось однажды, второй раз не случится, и
+    прибавлять к накопленному правильно. Годовщина — не событие, а свойство
+    дня: она «происходит» на каждом фоновом заходе, то есть каждые несколько
+    секунд. Прибавляй её `record_urge` — и за час сила ушла бы за все мыслимые
+    пороги, а персонаж заговорил бы о дне рождения с одержимостью.
+
+    Проверяется существование, а НЕ `ON CONFLICT`, потому что частичный
+    уникальный индекс стоит с условием `spoken_at IS NULL`: сказав про
+    годовщину, персонаж снял бы себе запрет — и следующий же заход завёл бы её
+    заново. Здесь смотрят на все строки, сказанные тоже.
+
+    Возвращает, завелась ли. Ложь — обычный исход: за сутки он истинен один
+    раз.
+    """
+    row = conn.execute(
+        """
+        INSERT INTO impulses (kind, subject, urge, created_at, updated_at,
+                              expires_at)
+        SELECT 'anniversary', %(subject)s, %(urge)s, %(now)s, %(now)s, %(exp)s
+         WHERE NOT EXISTS (
+               SELECT 1 FROM impulses
+                WHERE kind = 'anniversary'
+                  AND coalesce(subject, '') = coalesce(%(subject)s, '')
+                  AND created_at > %(now)s - make_interval(secs => %(gap)s)
+         )
+        RETURNING id
+        """,
+        {"subject": subject, "urge": amount, "now": now, "exp": expires_at,
+         "gap": within_hours * 3600.0},
+    ).fetchone()
+    return row is not None
+
+
 def strongest_impulse(conn, now, floor: float):
     """Самый сильный несказанный повод выше порога. Протухшее не считается.
 

@@ -3,7 +3,7 @@
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 import config
@@ -17,7 +17,7 @@ from mind import (VERDICT_WRITE, build_system_prompt, check_memory,
                   extract_objects, linger, notice_promise, propose_birthplaces,
                   propose_names, reflect_mood, reflect_self, reflect_traits,
                   say_promise, speak_first, weather_family)
-from snapshot import SESSION_GAP_HOURS, iso
+from snapshot import SESSION_GAP_HOURS, clip_text, iso
 from openai import OpenAI, OpenAIError
 
 NET_TIMEOUT = 10.0
@@ -425,6 +425,87 @@ def sense_impulses(eng, now: datetime, wx) -> list[Urge]:
     return out
 
 
+# =============================================================================
+# Годовщины (Шаг 45): повод, который приносит календарь
+# =============================================================================
+# `impulses.kind = 'anniversary'` назван в `0002_initiative.sql` и с тех пор
+# пустовал дольше всех — `curiosity` заполнился на Шаге 41, `dream` на Шаге 40.
+# Ждал он не очереди, а оси жизни: до Шага 36 у персонажа не было даты
+# рождения, а до Шага 38 — датированных воспоминаний, то есть годовщине нечему
+# было быть годовщиной.
+#
+# **Единственный повод в проекте, который не стоит НИ ОДНОГО вызова модели и
+# ни одного обращения к сети.** День рождения считается вычитанием из
+# `born_at`, остальное — одним узким запросом к канону. Это делает его самым
+# дешёвым источником инициативы и, что важнее, единственным, который работает
+# при лежащей сети.
+#
+# **Сегодня — по ЕГО месту**, как ночь у сна. Календарь — вещь местная, и
+# годовщина, наступившая по часам сервера, наступила не у него.
+
+# День рождения весомее прочих годовщин, и разрыв намеренно велик. Прочие —
+# повод вспомнить; свой день рождения человек либо отмечает, либо нарочито не
+# отмечает, но мимо не проходит.
+BIRTHDAY_URGE = 1.8
+ANNIVERSARY_URGE = 1.3
+
+# Столько не заводим повторно. Двадцать часов, а не двадцать четыре: сутки
+# ровно означали бы, что на следующий день повод не заведётся, если заход
+# случится на минуту раньше вчерашнего.
+ANNIVERSARY_ONCE_HOURS = 20.0
+
+# Обрезка предмета. Короче, чем у сна: там `subject` — выжимка текста, который
+# целиком лежит в `memories`, а здесь в предмет уезжает ещё и «сколько лет
+# назад», и длинный хвост вытолкнул бы его из ремарки.
+ANNIVERSARY_SUBJECT_LIMIT = 90
+
+
+def _end_of_day(now: datetime, tz) -> datetime:
+    """Полночь следующих суток по месту. Это и есть срок годности годовщины.
+
+    Не «плюс двадцать часов»: годовщина перестаёт быть сегодняшней ровно в
+    полночь, и повод, доживший до завтра, говорил бы «сегодня» про вчера.
+    """
+    local = now.astimezone(tz)
+    midnight = (local + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return midnight.astimezone(timezone.utc)
+
+
+def sense_anniversaries(eng, now: datetime, tz) -> list[Urge]:
+    """Что сегодня за день. Чувствует, но НЕ пишет — как `sense_impulses`.
+
+    Отдельной функцией, а не веткой `sense_impulses`, по двум причинам.
+    Первая: писатель другой (`note_anniversary` вместо `record_urge`), и
+    смешанный список пришлось бы разбирать по роду на записи. Вторая: здесь
+    нужен пояс, а `sense_impulses` его не знает и знать не должен — погода с
+    тишиной календаря не касаются.
+    """
+    out: list[Urge] = []
+    today = now.astimezone(tz).date()
+    expires = _end_of_day(now, tz)
+
+    born = eng.born_at()
+    if born is not None:
+        years = today.year - born.year
+        if (born.month, born.day) == (today.month, today.day) and years >= 1:
+            out.append(Urge(
+                "anniversary",
+                f"тебе сегодня {years} {timeutil.years_word(years)}",
+                BIRTHDAY_URGE, expires_at=expires))
+
+    for m in eng.memories_on(today.month, today.day):
+        years = today.year - m["happened_at"].year
+        if years < 1:
+            continue
+        subject = (f"ровно {years} {timeutil.years_word(years)} назад: "
+                   f"{clip_text(m['text'], ANNIVERSARY_SUBJECT_LIMIT)}")
+        out.append(Urge("anniversary", subject, ANNIVERSARY_URGE,
+                        expires_at=expires))
+
+    return out
+
+
 def _pick_impulse(eng, now: datetime) -> dict | None:
     """Самый сильный повод выше порога: вычисляемый или хранимый.
 
@@ -583,6 +664,16 @@ def background_tick(eng, edges: Edges, now: datetime, *,
         with eng.unit():
             for u in urges:
                 eng.record_urge(u.kind, u.subject, u.amount, now, u.expires_at)
+
+    # Годовщины пишутся СВОИМ писателем (Шаг 45): накопление им противопоказано,
+    # потому что повод держится весь день, а заходов за день тысячи. Стоят они
+    # тут же, до заслонок, по тому же доводу, что и погода: замеченное надо
+    # записать, даже если говорить сегодня уже не придётся.
+    for u in sense_anniversaries(eng, now, tz):
+        with eng.unit():
+            if eng.note_anniversary(u.subject, u.amount, now, u.expires_at,
+                                    ANNIVERSARY_ONCE_HOURS):
+                logging.info("годовщина: %s", u.subject)
 
     # Пауза и бюджет спрашиваются ДО выбора повода: ни та ни другой не
     # зависят от того, какой повод победит, и спросить их первыми дешевле
