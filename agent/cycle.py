@@ -240,7 +240,8 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
         turn = eng.snapshot(now)
         findings = job["findings"]
         t = time.monotonic()
-        new_mood = reflect_mood(turn, pair["user_text"], pair["answer"], edges.llm)
+        new_mood = reflect_mood(turn, pair["user_text"], pair["answer"],
+                                edges.llm, now=now)
         logging.info("digest reflect_mood: %.1fs", time.monotonic() - t)
         new_assertions = reflect_self(
             turn, pair["user_text"], pair["answer"], edges.llm)
@@ -260,8 +261,10 @@ def digest_one(eng, edges: Edges, now: datetime) -> bool:
             asked_at=asked_at, tz=config.TZ)
         logging.info("digest обещание: %.1fs", time.monotonic() - t)
         with eng.unit():
+            # `None` — настроение не менялось, и это обычный исход (Шаг 44).
+            # Метка `mood_since` при этом не двигается: в том и инерция.
             if new_mood:
-                eng.set_mood(new_mood)
+                eng.set_mood(new_mood[0], new_mood[1], now)
             if new_assertions:
                 eng.merge_self_assertions(new_assertions, now)
             for cand in candidates:

@@ -193,7 +193,8 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
     """
     agent = conn.execute(
         """
-        SELECT name, born_at, birthplace, traits, mood, place_label, outside_latch
+        SELECT name, born_at, birthplace, traits, mood, mood_reason, mood_since,
+               place_label, outside_latch
           FROM agent WHERE id = 1
         """
     ).fetchone() or {}
@@ -270,6 +271,8 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
         birthplace=agent.get("birthplace"),
         traits=tuple(agent.get("traits") or ()),
         mood=agent.get("mood", "нейтральное"),
+        mood_reason=agent.get("mood_reason"),
+        mood_since=iso(agent.get("mood_since")),
         place_label=agent.get("place_label"),
         self_assertions=by_object.get(SELF_ID, []),
         outside_latch=agent.get("outside_latch"),
@@ -582,7 +585,8 @@ def _fill_fixture(conn, state: dict) -> None:
         -- сам, но и не напоминает о новом.
         UPDATE agent SET name=%s, born_at=%s, birthplace=%s, traits=%s, mood=%s,
                place_label=%s, place_lat=%s, place_lon=%s, outside_latch=%s,
-               last_exchange_ts=%s, last_search_ts=NULL, traits_at=%s
+               last_exchange_ts=%s, last_search_ts=NULL, traits_at=%s,
+               mood_reason=%s, mood_since=%s
          WHERE id = 1
         """,
         (
@@ -597,6 +601,8 @@ def _fill_fixture(conn, state: dict) -> None:
             json.dumps(self.get("outside")) if self.get("outside") else None,
             state.get("last_exchange_ts"),
             self.get("traits_at"),
+            self.get("mood_reason"),
+            self.get("mood_since"),
         ),
     )
 

@@ -124,8 +124,19 @@ class PgEngine:
              place.get("source"), place.get("asked"), place.get("resolved_at")),
         )
 
-    def set_mood(self, mood: str) -> None:
-        self.conn.execute("UPDATE agent SET mood = %s WHERE id = 1", (mood,))
+    def set_mood(self, mood: str, reason: str | None, now: datetime) -> None:
+        """Сменить настроение. Метка двигается ВСЕГДА — зовут только на смене.
+
+        Решение «менять или нет» принимает проход (`mind.reflect_mood`), а не
+        хранилище: ответ «прежнее» сюда просто не доходит. Сравнивать слова
+        здесь было бы вторым местом, где принимается то же решение, — и
+        разошлись бы они на первой же смене регистра.
+        """
+        self.conn.execute(
+            "UPDATE agent SET mood = %s, mood_reason = %s, mood_since = %s "
+            "WHERE id = 1",
+            (mood, reason, now),
+        )
 
     def touch_exchange(self, now: datetime) -> None:
         self._pg.touch_exchange(self.conn, now)

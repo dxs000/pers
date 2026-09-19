@@ -196,6 +196,10 @@ class Turn:
     birthplace: str | None = None
     traits: tuple[str, ...] = ()
     mood: str = "нейтральное"
+    # Отчего и с каких пор (Шаг 44). `mood_since` — ISO-строка, как `born_at`:
+    # часов в этом модуле нет и не будет, давность считает `mind`.
+    mood_reason: str | None = None
+    mood_since: str | None = None
     place_label: str | None = None
     self_assertions: list[dict] = field(default_factory=list)
     # Всплывшие воспоминания, УЖЕ отобранные хранилищем. Полного среза,

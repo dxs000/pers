@@ -122,6 +122,51 @@ NAMES_COUNT = 20
 GENESIS_GENDER = "мальчику"
 
 
+# =============================================================================
+# Настроение (Шаг 44)
+# =============================================================================
+# Сколько настроение держится, прежде чем перестать ехать в промпт. Полтора
+# суток: дольше не держится ни одно настроение, вызванное разговором, — а
+# именно разговором оно здесь и вызывается. Всё, что живёт дольше, называется
+# уже не настроением, а чертой, и для этого есть свой проход.
+#
+# Выцветание — ВЫПАДЕНИЕ БЛОКА, а не возврат к «нейтральному». Возврат был бы
+# досевом умолчания поверх нажитого, то есть тем самым, что Шаг 42 снял у
+# черт. Настроения может не быть, и это законно: словом описывают то, что
+# отличается от обычного.
+MOOD_FADE_HOURS = 36.0
+
+
+def _render_mood(turn: Turn, now) -> str:
+    """Строка настроения или пустая. Пустая — законный и нередкий исход.
+
+    Причина и давность появляются, только когда есть что сказать: свежее
+    настроение без внятного повода рендерится ровно так же, как рендерилось
+    до Шага 44, — и живая база, у которой `mood_since` ещё NULL, переживает
+    шаг без единой правки.
+    """
+    mood = (turn.mood or "").strip()
+    if not mood:
+        return ""
+
+    since = timeutil.parse_ts(turn.mood_since or "")
+    if since is not None and now is not None:
+        hours = (now - since).total_seconds() / 3600.0
+        if hours >= MOOD_FADE_HOURS:
+            return ""
+
+    line = f"Сейчас твое настроение - {mood}"
+    tail = []
+    if now is not None:
+        age = timeutil.mood_age_word(since, now)
+        if age:
+            tail.append(age)
+    reason = (turn.mood_reason or "").strip()
+    if reason:
+        tail.append(reason)
+    return f"{line} ({', '.join(tail)})" if tail else line
+
+
 def build_system_prompt(
     turn: Turn,
     now=None,
@@ -164,8 +209,13 @@ def build_system_prompt(
     # обязана остаться БАЙТ-В-БАЙТ прежней, иначе шаг красит все эталоны
     # системного промпта по причине, к чертам не относящейся.
     about = f"Твои черты характера: {traits_string}. " if traits_string else ""
-    feeling = f"Сейчас твое настроение - {mood}"
-    parts.append(f"{who}. {about}{feeling}" if who else f"{about}{feeling}")
+    feeling = _render_mood(turn, now)
+    head = f"{about}{feeling}".strip()
+    # Точка ставится только тогда, когда за `who` что-то следует. Прежняя
+    # склейка `f"{who}. {about}{feeling}"` предполагала, что `feeling` есть
+    # всегда; с Шага 44 настроение выцветает, и при пустых чертах строка
+    # кончалась бы точкой и пробелом.
+    parts.append(f"{who}. {head}".strip() if who else head)
 
     label = turn.place_label
     if label:
@@ -214,37 +264,103 @@ def build_system_prompt(
 
     return"\n\n".join(parts)    
 
-def reflect_mood(turn: Turn, user_text:str, answer:str, client) -> str | None:
-    current = turn.mood
+# Слово «не менялось». Как `LINGER_NONE` и `PROMISE_NONE`: проверяется началом
+# строки, потому что модель охотно приписывает «прежнее, ничего не изменилось».
+MOOD_KEEP = "прежнее"
+MOOD_SEP = "|"
+# Настроение — одно-два слова, причина — короткая фраза. Длиннее означает, что
+# модель пересказала обмен вместо того, чтобы назвать повод.
+MOOD_REASON_LIMIT = 80
 
-    prompt = (
-        f"Текущее настроение персонажа: {current}. "
-        f"Последний обмен репликами.\n"
-        f"Собеседник: {user_text}\n"
-        f"Персонаж ответил: {answer}\n"
-        f"Каким стало настроение персонажа после этого обмена? "
-        f"Ответь одним словом - новым настроением, "
-        f"без пояснений и знаков препинаний."
+
+def _build_mood_prompt(turn: Turn, user_text: str, answer: str,
+                       age_word: str) -> str:
+    """Промпт настроения. Спрашивает ИЗМЕНИЛОСЬ ЛИ, а не «каким стало».
+
+    Разница между двумя этими вопросами и есть весь Шаг 44. «Каким стало»
+    не предусматривает ответа «никаким»: спрошенная так модель обязана
+    назвать слово — и называет, каждый раз новое, подбирая его под последнюю
+    реплику собеседника. Настроение при этом получалось не свойством
+    персонажа, а отражением того, кто с ним говорит.
+    """
+    held = f" Держится {age_word}." if age_word else ""
+    reason = (turn.mood_reason or "").strip()
+    because = f" Началось с того, что: {reason}." if reason else ""
+
+    return (
+        "Ты - служебный проход настроение. Задача: посмотреть на один обмен \n"
+        "репликами и решить, ИЗМЕНИЛОСЬ ЛИ от него настроение персонажа.\n\n"
+
+        f"Сейчас у него: {turn.mood}.{held}{because}\n\n"
+
+        "Настроение - не отклик на реплику. Оно держится часами и меняется \n"
+        "от того, что человека задело, а не от того, что ему сказали. \n"
+        "Вежливый вопрос, смена темы, шутка, несогласие - не повод. \n"
+        "Повод - это плохая новость, чужая боль, обида, облегчение, \n"
+        "внезапная радость: то, что осталось бы с ним, даже если бы \n"
+        "разговор на этом кончился.\n\n"
+
+        "Чем дольше настроение держится, тем весомее должен быть повод \n"
+        "его сменить.\n\n"
+
+        "Изменилось - ответь ОДНОЙ строкой в формате:\n"
+        f"настроение {MOOD_SEP} отчего\n"
+        "Настроение - одним-двумя словами. Отчего - коротко и по существу \n"
+        "того, что случилось, а не пересказ реплики.\n\n"
+
+        f"Не изменилось - ответь одним словом: {MOOD_KEEP}. Это САМЫЙ \n"
+        "ЧАСТЫЙ ответ, и он лучше натянутой смены: человек, у которого \n"
+        "настроение меняется каждые две реплики, выглядит не живым, \n"
+        "а безвольным.\n\n"
+
+        f"Собеседник: {clip_text(user_text)}\n"
+        f"{turn.name}: {clip_text(answer)}\n"
     )
 
+
+def _parse_mood(row: str) -> tuple[str, str | None] | None:
+    """'задумчивый | ...' -> (настроение, причина). `None` — не менялось.
+
+    Отказ и мусор неразличимы, как у любопытства и обещаний: и «прежнее», и
+    «модель ответила абзацем» означают для писателя одно — не трогать.
+    """
+    flat = " ".join(_strip_fences(row or "").split())
+    if not flat:
+        return None
+    first = flat.splitlines()[0] if "\n" in flat else flat
+    if first.lower().lstrip("«\"'").startswith(MOOD_KEEP):
+        return None
+
+    head, sep, reason = first.partition(MOOD_SEP)
+    mood = head.strip().strip(".!?\"'«»").lower()
+    if not mood or len(mood.split()) > 2:
+        logging.warning("настроение: невалидный ответ: %s", row)
+        return None
+
+    # Причина необязательна. Настроение может смениться без внятного повода,
+    # и это честнее выдуманного: пустая причина рендерится отсутствием
+    # пометки, а не словами «непонятно почему».
+    reason = reason.strip().strip("«»\"'").strip() if sep else ""
+    return mood, (clip_text(reason, MOOD_REASON_LIMIT) or None)
+
+
+def reflect_mood(turn: Turn, user_text: str, answer: str, client,
+                 now=None) -> tuple[str, str | None] | None:
+    """Новое настроение с причиной, или `None` — если не менялось."""
+    age_word = timeutil.mood_age_word(
+        timeutil.parse_ts(turn.mood_since or ""), now) if now else ""
+    prompt = _build_mood_prompt(turn, user_text, answer, age_word)
     try:
         response = client.chat.completions.create(
-            model = config.DEEPSEEK_MODEL_LIGHT,
-            messages=[{"role":"user", "content":prompt}],
-            extra_body={"thinking": {"type": "disabled"}}
+            model=config.DEEPSEEK_MODEL_LIGHT,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body={"thinking": {"type": "disabled"}},
         )
     except OpenAIError as err:
         logging.warning("reflect_mood: запрос упал: %s", err)
         return None
+    return _parse_mood(response.choices[0].message.content or "")
 
-    row=response.choices[0].message.content or ""
-    mood = row.strip().strip(".!?\"'").lower()
-
-    if not mood or len(mood.split())>2:
-        logging.warning("reflect_mood: невалидный ответ: %s", row)
-        return None
-
-    return mood
 
 def reflect_self(turn: Turn, user_text: str, answer: str, client) -> list[dict]:
     prompt = _build_reflector_prompt(turn, user_text, answer)
