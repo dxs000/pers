@@ -1,7 +1,7 @@
 """Заход к новостям: посмотреть, не пересказать.
 
-В чат не идёт лента. Если ничего не отозвалось — метка сдвинута, тишина.
-Если отозвалось — импульс 'news', говорит background_tick своими словами.
+Если не отозвалось — тишина. Если отозвалось — реплика в чат
+в этом же заходе, мимо заслонок background_tick.
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ NEWS_URGE = 1.15
 NEWS_TTL_HOURS = 24.0
 
 
-def news_tick(eng, edges, now: datetime, *, tz=None, force: bool = False):
+def news_tick(eng, edges, now: datetime, *, tz=None, force: bool = False,
+              announce=None):
     tz = tz or config.TZ
     if not force:
         local = now.astimezone(tz)
@@ -83,11 +84,40 @@ def news_tick(eng, edges, now: datetime, *, tz=None, force: bool = False):
         log.info("новости: отозвалось без предмета — не говорю")
         return "глянул в новости, мимо"
 
-    expires = now + timedelta(hours=NEWS_TTL_HOURS)
+    impulse = {
+        "kind": "news",
+        "subject": subject[:200],
+        "id": None,
+        "urge": NEWS_URGE,
+    }
+    text = _speak(eng, edges, turn, impulse, now, tz)
+    if not text:
+        expires = now + timedelta(hours=NEWS_TTL_HOURS)
+        with eng.unit():
+            eng.record_urge("news", subject[:200], NEWS_URGE, now, expires)
+        log.info("новости: отозвалось, сказать не вышло — импульс оставлен")
+        return f"отозвалось: {subject[:80]}"
+
     with eng.unit():
-        eng.record_urge("news", subject[:200], NEWS_URGE, now, expires)
-    log.info("новости: отозвалось — %s", subject[:80])
-    return f"отозвалось: {subject[:80]}"
+        eng.append_utterance(text, now)
+    log.info("новости в чат: %s", text[:80])
+    if announce is not None:
+        announce(text)
+    return text
+
+
+def _speak(eng, edges, turn, impulse, now, tz):
+    from mind import speak_first
+    try:
+        return speak_first(
+            turn, impulse, edges.llm,
+            memory=eng.working_memory(),
+            now=now.astimezone(tz),
+            last_exchange=eng.last_exchange(),
+        )
+    except Exception as err:
+        log.warning("новости: реплика не собралась: %s", err)
+        return None
 
 
 def _query(place: str) -> str:
