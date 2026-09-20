@@ -77,6 +77,40 @@ export async function readOpenSessionMessages() {
   return result.rows;
 }
 
+export async function readShelf() {
+  const waiting = await pool.query(
+    "SELECT count(*)::int AS n FROM books WHERE picked_at IS NULL"
+  );
+  const book = await pool.query(
+    `SELECT id, title, author, length, position, picked_at
+       FROM books
+      WHERE picked_at IS NOT NULL AND closed_at IS NULL`
+  );
+  const row = book.rows[0] ?? null;
+  if (!row) {
+    return { holding: null, waiting: waiting.rows[0]?.n ?? 0 };
+  }
+  const notes = await pool.query(
+    `SELECT text
+       FROM notes
+      WHERE book_id = $1
+      ORDER BY at DESC, id DESC
+      LIMIT 2`,
+    [row.id]
+  );
+  const length = row.length || 1;
+  return {
+    holding: {
+      title: row.title,
+      author: row.author,
+      progress: Math.round((row.position / length) * 10000) / 10000,
+      started: row.picked_at,
+      notes: notes.rows.map((n) => n.text),
+    },
+    waiting: waiting.rows[0]?.n ?? 0,
+  };
+}
+
 export async function listenReplies(onReply) {
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();

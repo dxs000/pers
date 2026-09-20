@@ -9,6 +9,7 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [log, setLog] = useState([]);
   const [live, setLive] = useState(false);
+  const [shelf, setShelf] = useState(null);
   const inboxIdRef = useRef(null);
 
   const busy = status?.state === "waiting" && !status?.timeout;
@@ -19,12 +20,19 @@ export default function App() {
     setLog(data.messages ?? []);
   }
 
+  async function loadShelf() {
+    const res = await fetch(`${API}/shelf`);
+    if (!res.ok) return;
+    setShelf(await res.json());
+  }
+
   useEffect(() => {
     inboxIdRef.current = inboxId;
   }, [inboxId]);
 
   useEffect(() => {
     loadSession();
+    loadShelf();
   }, []);
 
   useEffect(() => {
@@ -38,6 +46,7 @@ export default function App() {
       src.addEventListener("reply", async () => {
         setLive(true);
         await loadSession();
+        await loadShelf();
         const id = inboxIdRef.current;
         if (id == null) return;
         const res = await fetch(`${API}/inbox/${id}`);
@@ -84,6 +93,12 @@ export default function App() {
     setText("");
   }
 
+  const holding = shelf?.holding;
+  const who = holding
+    ? [holding.author, holding.title].filter(Boolean).join(". ")
+    : null;
+  const pct = holding ? Math.round((holding.progress ?? 0) * 100) : null;
+
   return (
     <div className="app">
       <header className="top">
@@ -100,6 +115,27 @@ export default function App() {
           </span>
         </div>
       </header>
+
+      <div className="shelf">
+        {holding ? (
+          <>
+            <p>
+              на руках «{who}»
+              {pct != null ? ` — ${pct}%` : ""}
+            </p>
+            {holding.notes?.[0] ? (
+              <p className="shelf-note">{holding.notes[0]}</p>
+            ) : null}
+          </>
+        ) : (
+          <p>
+            на руках пусто
+            {shelf?.waiting
+              ? ` · на полке ${shelf.waiting}`
+              : ""}
+          </p>
+        )}
+      </div>
 
       <main className="stage">
         {log.length === 0 ? (

@@ -48,6 +48,25 @@ body {
   border-top-width: 1px;
 }
 
+.shelf {
+  padding: 0.55rem 1.75rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.shelf p {
+  margin: 0;
+}
+
+.shelf-note {
+  margin-top: 0.25rem;
+  font-family: var(--serif);
+  font-style: italic;
+  color: var(--fg);
+  max-width: 40rem;
+}
+
 .stage {
   flex: 1;
   min-height: 0;
