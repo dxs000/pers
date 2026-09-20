@@ -79,6 +79,8 @@ APP_PLACE = os.getenv("APP_PLACE", "").strip() or None
 
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", BASE_DIR / "library")).expanduser()
 OUTBOX_DIR = Path(os.getenv("OUTBOX_DIR", BASE_DIR / "outbox")).expanduser()
+_log_raw = (os.getenv("AGENT_LOG") or "").strip()
+AGENT_LOG = Path(_log_raw).expanduser() if _log_raw else (BASE_DIR / "var" / "agent.log")
 
 _LIMITS = httpx.Limits(
     max_keepalive_connections=5,
