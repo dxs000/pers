@@ -28,7 +28,14 @@ DEEPSEEK_MODEL_LIGHT = os.getenv("DEEPSEEK_MODEL_LIGHT", DEEPSEEK_MODEL)
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "60.0"))
 
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+YANDEX_SEARCH_API_KEY = (
+    os.getenv("YANDEX_SEARCH_API_KEY")
+    or os.getenv("SEARCH_API_KEY")
+    or os.getenv("TAVILY_API_KEY")
+    or ""
+).strip()
+YANDEX_FOLDER_ID = (os.getenv("YANDEX_FOLDER_ID") or "").strip()
+TAVILY_API_KEY = YANDEX_SEARCH_API_KEY
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "")
