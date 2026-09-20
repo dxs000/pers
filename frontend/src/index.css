@@ -59,12 +59,33 @@ body {
   margin: 0;
 }
 
+.shelf-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.shelf-upload {
+  cursor: pointer;
+  color: #d7c7ae;
+  white-space: nowrap;
+}
+
+.shelf-upload input {
+  display: none;
+}
+
 .shelf-note {
   margin-top: 0.25rem;
   font-family: var(--serif);
   font-style: italic;
   color: var(--fg);
   max-width: 40rem;
+}
+
+.shelf-job {
+  margin-top: 0.35rem;
 }
 
 .stage {

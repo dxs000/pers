@@ -10,7 +10,9 @@ export default function App() {
   const [log, setLog] = useState([]);
   const [live, setLive] = useState(false);
   const [shelf, setShelf] = useState(null);
+  const [convert, setConvert] = useState(null);
   const inboxIdRef = useRef(null);
+  const fileRef = useRef(null);
 
   const busy = status?.state === "waiting" && !status?.timeout;
 
@@ -76,6 +78,18 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [status]);
 
+  useEffect(() => {
+    if (!convert?.id || convert.state !== "running") return;
+    const timer = setInterval(async () => {
+      const res = await fetch(`${API}/shelf/convert/${convert.id}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setConvert(data);
+      if (data.state !== "running") loadShelf();
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [convert?.id, convert?.state]);
+
   async function send(e) {
     e.preventDefault();
     const value = text.trim();
@@ -91,6 +105,22 @@ export default function App() {
     setStatus({ state: "waiting", text: null });
     setInboxId(data.id);
     setText("");
+  }
+
+  async function uploadBook(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const body = new FormData();
+    body.append("file", file);
+    setConvert({ state: "running", file: file.name, log: "" });
+    const res = await fetch(`${API}/shelf/source`, { method: "POST", body });
+    const data = await res.json();
+    if (!res.ok) {
+      setConvert({ state: "failed", file: file.name, log: data.error || "upload failed" });
+      return;
+    }
+    setConvert({ id: data.id, state: "running", file: data.saved, log: "" });
   }
 
   const holding = shelf?.holding;
@@ -117,24 +147,40 @@ export default function App() {
       </header>
 
       <div className="shelf">
-        {holding ? (
-          <>
+        <div className="shelf-row">
+          {holding ? (
             <p>
               на руках «{who}»
               {pct != null ? ` — ${pct}%` : ""}
             </p>
-            {holding.notes?.[0] ? (
-              <p className="shelf-note">{holding.notes[0]}</p>
-            ) : null}
-          </>
-        ) : (
-          <p>
-            на руках пусто
-            {shelf?.waiting
-              ? ` · на полке ${shelf.waiting}`
-              : ""}
+          ) : (
+            <p>
+              на руках пусто
+              {shelf?.waiting
+                ? ` · на полке ${shelf.waiting}`
+                : ""}
+            </p>
+          )}
+          <label className="shelf-upload">
+            положить книгу
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".fb2,.zip,.epub,.pdf,.djvu,.djv,.txt,.md"
+              onChange={uploadBook}
+            />
+          </label>
+        </div>
+        {holding?.notes?.[0] ? (
+          <p className="shelf-note">{holding.notes[0]}</p>
+        ) : null}
+        {convert ? (
+          <p className="shelf-job">
+            {convert.state === "running" && `конвертирую ${convert.file || "книгу"}…`}
+            {convert.state === "ok" && `${convert.file}: на полке. Каталог подхватит демон.`}
+            {convert.state === "failed" && `${convert.file}: не прошло ворота или convert упал.`}
           </p>
-        )}
+        ) : null}
       </div>
 
       <main className="stage">
