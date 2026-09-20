@@ -21,18 +21,8 @@ from timeutil import parse_tz
 BASE_DIR = Path(__file__).parent
 load_dotenv(BASE_DIR / ".env")
 
-# `STATE_PATH` здесь стоял до Шага 26. Состояние жило файлом на диске;
-# теперь оно живёт в Postgres, и путь к файлу стал бы ровно тем мёртвым,
-# от которого предостерегает докстринг модуля: обещанием ручки, которой нет.
-
-# =============================================================================
-# LLM
-# =============================================================================
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-# Дефолт обязан быть рабочим именем модели, а не заглушкой: на машине без
-# `.env` первый же запрос уходит именно с ним, и опечатка вылезает
-# невнятной ошибкой провайдера в момент, когда отлаживаешь совсем другое.
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_MODEL_LIGHT = os.getenv("DEEPSEEK_MODEL_LIGHT", DEEPSEEK_MODEL)
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
@@ -40,27 +30,11 @@ REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "60.0"))
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
-# =============================================================================
-# Postgres
-# =============================================================================
-# Рабочая база. В ней живёт память персонажа.
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-
-# Тестовая база — ОТДЕЛЬНАЯ, и это не педантизм. `store_pg.load_fixture`
-# начинается с `TRUNCATE`: сбруя обязана стартовать с известного состояния,
-# иначе прогон зависит от того, что осталось от прошлого. Смотри она в
-# рабочую базу — `golden.py --check` стирал бы память персонажа, и стирал
-# бы молча, потому что команда выглядит как проверка.
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "")
 
 
 def require_dsn(test: bool = False) -> str:
-    """Строка подключения или внятная ошибка. По лекалу `require_api_key`.
-
-    При `test=True` дополнительно требует, чтобы тестовая база НЕ совпадала
-    с рабочей. Совпадение — не «странная настройка», а команда на снос
-    памяти, и запускать её по недосмотру нельзя.
-    """
     dsn = TEST_DATABASE_URL if test else DATABASE_URL
     if not dsn:
         name = "TEST_DATABASE_URL" if test else "DATABASE_URL"
@@ -75,37 +49,20 @@ def require_dsn(test: bool = False) -> str:
 
 
 def _same_database(a: str, b: str) -> bool:
-    """Одна ли это база. Сравнение грубое и нарочно осторожное: DSN можно
-    записать десятком способов, и точное сравнение легко обмануть, поэтому
-    достаточное подозрение считается совпадением."""
     if not a or not b:
         return False
     return a.strip().rstrip("/") == b.strip().rstrip("/")
 
-# =============================================================================
-# Оболочка
-# =============================================================================
 APP_NAME = os.getenv("APP_NAME", "App")
 USER_PROMPT = os.getenv("USER_PROMPT", "User >")
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "System >")
 EXIT_WORD = os.getenv("EXIT_WORD", "exit")
 
-# Часовой пояс рендера. Числовое смещение работает всегда; имя зоны
-# ("Asia/Tbilisi") — только если в системе есть база tzdata. На голом
-# сервере её может не быть, и `parse_tz` тогда молча вернёт дефолт:
-# согласованность пояса с местом проверяет `main.check_timezone`.
-# Дефолта больше нет (Шаг 0.2): «3» работало полгода в году и молча
-# врало вторые полгода. Спецификация держится отдельно от разобранной
-# зоны — `agent.require_named_timezone` проверяет именно её, а
-# `parse_tz` к этому моменту уже забыл, что ему дали.
 TZ_SPEC = os.getenv("APP_TZ", "").strip()
 TZ = parse_tz(TZ_SPEC)
 
 
 def _coord(name: str) -> float | None:
-    """Координата из окружения. Не задана или мусор -> None: место —
-    свойство объекта №0, а не обязательная настройка. Нет координат —
-    блок среды просто не появляется, диалог живёт."""
     raw = os.getenv(name, "").strip()
     if not raw:
         return None
@@ -116,36 +73,13 @@ def _coord(name: str) -> float | None:
         return None
 
 
-# Посев места. Источник истины после первого запуска — state["self"]["place"],
-# отсюда значение только доливается через ensure_self (как name/traits).
-# Часовой пояс APP_TZ обязан быть согласован с этими координатами.
 APP_LAT = _coord("APP_LAT")
 APP_LON = _coord("APP_LON")
 APP_PLACE = os.getenv("APP_PLACE", "").strip() or None
 
-# =============================================================================
-# Полка (Шаг 48)
-# =============================================================================
-# Переехала из блока LLM: к ключам моделей она отношения не имеет, а стоящая
-# среди них читается как их настройка. Место рядом с `APP_PLACE` не
-# косметическое — это такая же рамка мира, как место жизни и часовой пояс.
-#
-# Текстов персонажа здесь нет и быть не может: книги живут файлами, а в базе
-# лежат путь, длина и позиция (`0011_reading.sql`).
-#
-# Читателей двое — `convert.py` кладёт на полку, `library.py` читает с неё, —
-# и потому переменная живёт в `config`, а не у одного из них: разъедься эти
-# два пути, конвертер писал бы в одну папку, а демон честно сообщал бы, что
-# полка пуста.
-#
-# `expanduser` — чтобы `LIBRARY_DIR=~/books` в `.env` означало то, что
-# написано. Без него тильда осталась бы именем папки, и полка создалась бы
-# рядом с проектом под именем `~`.
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", BASE_DIR / "library")).expanduser()
+OUTBOX_DIR = Path(os.getenv("OUTBOX_DIR", BASE_DIR / "outbox")).expanduser()
 
-# =============================================================================
-# HTTP
-# =============================================================================
 _LIMITS = httpx.Limits(
     max_keepalive_connections=5,
     max_connections=10,
@@ -156,27 +90,11 @@ _DISABLED = ("", "none", "null", "false")
 
 
 def proxy_url() -> str | None:
-    """Прокси проекта из `.env` или None.
-
-    Раньше отсюда возвращался словарь `{"http://": url}`, из которого
-    вызывающий брал первое значение. Форма намекала на пер-схемное
-    проксирование, которого не было ни дня; свёрнуто в строку.
-
-    Поиск ходит **не через этот прокси**: у него своя фабрика
-    (`web.build_search_client`) и своя переменная `SEARCH_PROXY_URL` —
-    поисковые домены прокси проекта не пропускает.
-    """
     raw = (os.getenv("PROXY_URL") or "").strip()
     return raw if raw and raw.lower() not in _DISABLED else None
 
 
 def _client_kwargs(timeout: float | None = None) -> dict:
-    """Общие параметры httpx-клиента: таймаут, прокси, редиректы.
-
-    `trust_env=False` — системные HTTP_PROXY/HTTPS_PROXY игнорируются
-    сознательно: канал задаётся только своей переменной, иначе на чужой
-    машине запрос уезжает неизвестно куда.
-    """
     kwargs = dict(
         timeout=httpx.Timeout(REQUEST_TIMEOUT if timeout is None else timeout),
         trust_env=False,
@@ -192,13 +110,9 @@ def _client_kwargs(timeout: float | None = None) -> dict:
 
 
 def get_sync_client(timeout: float | None = None) -> httpx.Client:
-    """Фабрика синхронного клиента. Требует httpx >= 0.28 (`proxy=`, не `proxies=`)."""
     return httpx.Client(limits=_LIMITS, **_client_kwargs(timeout))
 
 
-# =============================================================================
-# Валидация окружения
-# =============================================================================
 def require_api_key() -> str:
     if not DEEPSEEK_API_KEY:
         raise RuntimeError("Не задан DEEPSEEK_API_KEY")
