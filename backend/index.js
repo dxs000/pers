@@ -5,13 +5,14 @@ import { pushInbox, readState, notify, readOpenSessionMessages, listenReplies, C
 
 dotenv.config();
 
-const PORT = process.env.PORT || 8800
+const PORT = process.env.PORT || 8800;
+const HEARTBEAT_MS = 25_000;
 
 const app = express();
 
 const subscribers = new Set();
 
-listenReplies(() => broadcast()).catch((err) => {
+listenReplies(() => broadcast("reply")).catch((err) => {
   console.error("LISTEN reply_ready:", err);
 });
 
@@ -47,17 +48,25 @@ app.get("/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
   subscribers.add(res);
+  writeEvent(res, "ping", {});
   req.on("close", () => subscribers.delete(res));
 });
 
-function broadcast() {
+function writeEvent(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+function broadcast(event) {
   for (const res of subscribers) {
-    res.write("event: reply\ndata: {}\n\n");
+    writeEvent(res, event, {});
   }
 }
 
+setInterval(() => broadcast("ping"), HEARTBEAT_MS);
+
 app.listen(PORT, () => {
-    console.log(`Server running at port ${PORT}`);
-})
+  console.log(`Server running at port ${PORT}`);
+});

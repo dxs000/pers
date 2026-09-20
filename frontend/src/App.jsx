@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 
 const API = import.meta.env.VITE_API_URL;
+const RECONNECT_MS = 3_000;
 
 export default function App() {
   const [text, setText] = useState("");
   const [inboxId, setInboxId] = useState(null);
   const [status, setStatus] = useState(null);
   const [log, setLog] = useState([]);
+  const [live, setLive] = useState(false);
   const inboxIdRef = useRef(null);
 
   const busy = status?.state === "waiting" && !status?.timeout;
@@ -26,16 +28,35 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const src = new EventSource(`${API}/events`);
-    src.addEventListener("reply", async () => {
-      await loadSession();
-      const id = inboxIdRef.current;
-      if (id == null) return;
-      const res = await fetch(`${API}/inbox/${id}`);
-      const data = await res.json();
-      if (data.state !== "waiting") setStatus(data);
-    });
-    return () => src.close();
+    let src;
+    let timer;
+    let stopped = false;
+
+    function connect() {
+      src = new EventSource(`${API}/events`);
+      src.addEventListener("ping", () => setLive(true));
+      src.addEventListener("reply", async () => {
+        setLive(true);
+        await loadSession();
+        const id = inboxIdRef.current;
+        if (id == null) return;
+        const res = await fetch(`${API}/inbox/${id}`);
+        const data = await res.json();
+        if (data.state !== "waiting") setStatus(data);
+      });
+      src.onerror = () => {
+        setLive(false);
+        src.close();
+        if (!stopped) timer = setTimeout(connect, RECONNECT_MS);
+      };
+    }
+
+    connect();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      src?.close();
+    };
   }, []);
 
   useEffect(() => {
@@ -69,24 +90,24 @@ export default function App() {
         <div>
           <p className="eyebrow">очередь inbox</p>
           <h1>Реплика</h1>
-          <p className="sub">клиент пишет в inbox и читает ответ</p>
+          <p className="sub">
+            он может написать первым — экран держит канал reply_ready
+          </p>
         </div>
         <div className="top-right">
-          <label className="toggle">
-            демон
-            <span className="switch" />
-          </label>
-          <span>экран</span>
+          <span className={live ? "live on" : "live"}>
+            {live ? "канал жив" : "канал тих"}
+          </span>
         </div>
       </header>
 
       <main className="stage">
         {log.length === 0 ? (
           <div className="empty">
-            <h2>Напишите реплику</h2>
+            <h2>Можно молчать</h2>
             <p>
-              Она ляжет в очередь. Ответит агент, если он запущен
-              и смотрит inbox.
+              Он пишет первым, если захочется. Реплика придёт
+              сюда сама. Можно и написать — ляжет в inbox.
             </p>
           </div>
         ) : (
