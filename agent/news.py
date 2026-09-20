@@ -19,10 +19,11 @@ log = logging.getLogger("news")
 
 NEWS_HOUR_FROM = 8
 NEWS_HOUR_TO = 22
-NEWS_QUIET_HOURS = 1.0
-NEWS_INTERVAL_HOURS = 8.0
+NEWS_QUIET_HOURS = 0.25
+NEWS_INTERVAL_HOURS = 0.5
 NEWS_URGE = 1.15
 NEWS_TTL_HOURS = 24.0
+NEWS_QUERY = "главные новости России и мира сегодня"
 
 
 def news_tick(eng, edges, now: datetime, *, tz=None, force: bool = False,
@@ -50,8 +51,7 @@ def news_tick(eng, edges, now: datetime, *, tz=None, force: bool = False,
         return None
 
     turn = eng.snapshot(now)
-    place = (eng.place() or {}).get("label") or turn.place_label or ""
-    query = _query(place)
+    query = NEWS_QUERY
     found = web.search(
         query,
         edges.search,
@@ -118,13 +118,6 @@ def _speak(eng, edges, turn, impulse, now, tz):
     except Exception as err:
         log.warning("новости: реплика не собралась: %s", err)
         return None
-
-
-def _query(place: str) -> str:
-    place = (place or "").strip()
-    if place:
-        return f"главные события сегодня {place}"
-    return "главные события сегодня"
 
 
 def _news_at(eng):
