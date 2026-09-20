@@ -17,10 +17,10 @@ from openai import OpenAIError
 
 log = logging.getLogger("news")
 
-NEWS_HOUR_FROM = 8
-NEWS_HOUR_TO = 22
+NEWS_HOUR_FROM = 0
+NEWS_HOUR_TO = 24
 NEWS_QUIET_HOURS = 0.25
-NEWS_INTERVAL_HOURS = 0.5
+NEWS_INTERVAL_HOURS = 0.25
 NEWS_URGE = 1.15
 NEWS_TTL_HOURS = 24.0
 NEWS_QUERY = "главные новости России и мира сегодня"
