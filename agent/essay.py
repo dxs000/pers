@@ -1,9 +1,7 @@
 """Проход эссе: захотел — пишет вечер, не захотел — молчит.
 
-Не ветка cycle.py: второе дело держим отдельно, пока не видно общего каркаса
-(это прямо сказано в 0011_reading.sql). Почты нет. Тема с экрана нет.
+Не ветка cycle.py. Почты нет. Тема с экрана нет.
 """
-
 from __future__ import annotations
 
 import json
@@ -14,6 +12,7 @@ from pathlib import Path
 
 import config
 import outbox
+import store_essay
 from openai import OpenAIError
 
 log = logging.getLogger("essay")
@@ -28,7 +27,6 @@ CHUNK_CHARS = 2500
 
 
 def essay_tick(eng, edges, now: datetime, *, tz=None, force: bool = False):
-    """Один заход. None — не время или не захотел."""
     tz = tz or config.TZ
     if not force:
         local = now.astimezone(tz)
@@ -39,13 +37,12 @@ def essay_tick(eng, edges, now: datetime, *, tz=None, force: bool = False):
             idle = (now - max(stamps)).total_seconds() / 3600.0
             if 0.0 <= idle < ESSAY_QUIET_HOURS:
                 return None
-        settled = eng.essay_at()
+        settled = _essay_at(eng)
         if settled is not None:
             hours = (now - settled).total_seconds() / 3600.0
             if 0.0 <= hours < ESSAY_INTERVAL_HOURS:
                 return None
-
-    current = eng.current_essay()
+    current = store_essay.current_essay(eng.conn)
     if current is None:
         return _begin(eng, edges, now)
     return _continue(eng, edges, current, now)
@@ -55,29 +52,25 @@ def _begin(eng, edges, now: datetime):
     notes = eng.untold_notes(8)
     if not notes:
         with eng.unit():
-            eng.set_essay_at(now)
+            _set_essay_at(eng, now)
         return None
-
     turn = eng.snapshot(now)
-    prompt = _want_prompt(turn, notes)
-    data = _ask_json(edges.llm, prompt, light=True)
+    data = _ask_json(edges.llm, _want_prompt(turn, notes), light=True)
     if not data or not data.get("write"):
         with eng.unit():
-            eng.set_essay_at(now)
+            _set_essay_at(eng, now)
         return None
-
     title = (data.get("title") or "").strip()
     why = (data.get("why") or "").strip()
     if not title or not why:
         with eng.unit():
-            eng.set_essay_at(now)
+            _set_essay_at(eng, now)
         return None
-
     path = outbox.path_for(title)
     with eng.unit():
         rel = str(path.relative_to(outbox.root()) if _under(path, outbox.root()) else path)
-        row = eng.open_essay(title, why, rel, now)
-        eng.set_essay_at(now)
+        row = store_essay.open_essay(eng.conn, title, why, rel, now)
+        _set_essay_at(eng, now)
         if row is None:
             return None
     log.info("начал эссе: %s (%s)", title, why)
@@ -86,38 +79,32 @@ def _begin(eng, edges, now: datetime):
 
 def _continue(eng, edges, essay, now: datetime):
     turn = eng.snapshot(now)
-    past = eng.passages_so_far(essay["id"], 8)
-    prompt = _write_prompt(turn, essay, past)
-    data = _ask_json(edges.llm, prompt, light=False)
+    past = store_essay.passages_so_far(eng.conn, essay["id"], 8)
+    data = _ask_json(edges.llm, _write_prompt(turn, essay, past), light=False)
     if not data:
         with eng.unit():
-            eng.set_essay_at(now)
+            _set_essay_at(eng, now)
         return None
-
     quit = data.get("quit")
     chunk = (data.get("text") or "").strip()
     path = _resolve(essay["file_path"])
-
     with eng.unit():
-        eng.set_essay_at(now)
+        _set_essay_at(eng, now)
         if chunk:
             written = outbox.append(
                 path, chunk,
                 header=f"# {essay['title']}\n\n_{essay['why']}_",
             )
             if written:
-                eng.add_passage(essay["id"], chunk, now)
+                store_essay.add_passage(eng.conn, essay["id"], chunk, now)
         if quit:
-            eng.close_essay(essay["id"], now, str(quit))
-            eng.record_urge(
-                "essay", essay["title"], ESSAY_URGE, now,
-                now + timedelta(hours=ESSAY_TTL_HOURS))
+            store_essay.close_essay(eng.conn, essay["id"], str(quit), now)
+            eng.record_urge("essay", essay["title"], ESSAY_URGE, now,
+                            now + timedelta(hours=ESSAY_TTL_HOURS))
         elif data.get("done"):
-            eng.close_essay(essay["id"], now, "написал")
-            eng.record_urge(
-                "essay", essay["title"], ESSAY_URGE, now,
-                now + timedelta(hours=ESSAY_TTL_HOURS))
-
+            store_essay.close_essay(eng.conn, essay["id"], "написал", now)
+            eng.record_urge("essay", essay["title"], ESSAY_URGE, now,
+                            now + timedelta(hours=ESSAY_TTL_HOURS))
     if quit:
         log.info("бросил эссе: %s — %s", essay["title"], quit)
         return f"бросил эссе «{essay['title']}»"
@@ -130,6 +117,15 @@ def _continue(eng, edges, essay, now: datetime):
     return None
 
 
+def _essay_at(eng):
+    row = eng.conn.execute("SELECT essay_at FROM agent WHERE id = 1").fetchone()
+    return row["essay_at"] if row else None
+
+
+def _set_essay_at(eng, now):
+    eng.conn.execute("UPDATE agent SET essay_at = %s WHERE id = 1", (now,))
+
+
 def _under(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -140,9 +136,7 @@ def _under(path: Path, root: Path) -> bool:
 
 def _resolve(stored: str) -> Path:
     p = Path(stored)
-    if p.is_absolute():
-        return p
-    return outbox.root() / p
+    return p if p.is_absolute() else outbox.root() / p
 
 
 def _ask_json(client, prompt: str, *, light: bool):
@@ -155,8 +149,7 @@ def _ask_json(client, prompt: str, *, light: bool):
     except OpenAIError as err:
         log.warning("эссе: запрос упал: %s", err)
         return None
-    raw = response.choices[0].message.content or ""
-    return _parse_json(raw)
+    return _parse_json(response.choices[0].message.content or "")
 
 
 def _parse_json(raw: str):
@@ -183,14 +176,11 @@ def _want_prompt(turn, notes) -> str:
         f"Его зовут {who}. Каким он стал: {traits}.\n"
         f"Настроение: {turn.mood}.\n\n"
         f"Нерассказанные мысли с полей книг:\n{lines}\n\n"
-        f"Это не задание и не тема снаружи. Чаще правильный ответ — не писать: "
-        f"мысль, из которой не складывается текст, лучше оставить мыслью.\n"
-        f"Не бери «историю», «философию», «литературу» как жанр. Бери одну "
-        f"свою зацепку, если она тянет.\n\n"
+        f"Это не задание. Чаще правильный ответ — не писать.\n"
+        f"Не бери жанр как тему. Бери одну свою зацепку, если тянет.\n\n"
         f"Формат — ТОЛЬКО JSON:\n"
-        f'{{"write": false, "title": null, "why": null, "seed": null}}\n'
-        f"Если пишет: write=true, title — как он сам назвал бы, why — одной "
-        f"фразой зачем, seed — о чём первая фраза (можно null).\n"
+        "{\"write\": false, \"title\": null, \"why\": null, \"seed\": null}\n"
+        f"Если пишет: write=true, title, why одной фразой.\n"
     )
 
 
@@ -199,15 +189,11 @@ def _write_prompt(turn, essay, past) -> str:
     traits = ", ".join(turn.traits) if turn.traits else ""
     prev = "\n".join(f"- {c}" for c in past) if past else "(ещё ничего не написано)"
     return (
-        f"Ты пишешь эссе. Это твой вечер и твой текст: тему никто не задавал.\n\n"
+        f"Ты пишешь эссе. Тему никто не задавал.\n\n"
         f"Тебя зовут {who}. Черты: {traits}. Настроение: {turn.mood}.\n"
-        f"Эссе: «{essay['title']}». Зачем взялся: {essay['why']}.\n\n"
-        f"Что уже сказано (конспекты вечеров):\n{prev}\n\n"
-        f"Напиши СЛЕДУЮЩИЙ кусок, до {CHUNK_CHARS} знаков, связный, от себя, "
-        f"без заголовков и без списка. Не пересказывай конспекты.\n\n"
+        f"Эссе: «{essay['title']}». Зачем: {essay['why']}.\n\n"
+        f"Уже сказано:\n{prev}\n\n"
+        f"Следующий кусок, до {CHUNK_CHARS} знаков, от себя.\n\n"
         f"Формат — ТОЛЬКО JSON:\n"
-        f'{{"text": "...", "done": false, "quit": null}}\n'
-        f" - text: кусок или пустая строка, если сегодня не пишется;\n"
-        f" - done: true — текст закончен;\n"
-        f" - quit: строка-причина, если бросаешь. null — не бросаешь.\n"
+        "{\"text\": \"...\", \"done\": false, \"quit\": null}\n"
     )
