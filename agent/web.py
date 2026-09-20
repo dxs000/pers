@@ -4,73 +4,38 @@
 неудача — `None`, а не исключение.** Ключа нет, сеть молчит, сервис
 отказал — поиска сегодня нет, диалог живёт.
 
-**Транспорт приходит параметром**, как в `outside.weather`. Официальный
-SDK Tavily здесь сознательно не используется: он несёт свой транспорт на
-`requests`, а тот по умолчанию подхватывает системные `HTTP_PROXY` /
-`HTTPS_PROXY` — на этом мы уже обожглись. Запрос уходил через прокси,
-прокси отдавал страницу 403, SDK превращал её в `ForbiddenError` **с
-пустым текстом**, и отличить «фильтр на пути» от «протухший ключ» было
-нечем. Свой `httpx.Client` с `trust_env=False` такого не допускает, а
-цена — сорок строк разбора JSON.
-
-**Ключ уходит двумя способами сразу** — заголовком `Bearer` и полем
-`api_key` в теле. Tavily принимал обе формы в разное время; дублирование
-дешевле, чем выяснять, какая актуальна сегодня.
-
-**Здесь нет рендера.** Наружу — заголовок, ссылка, кусок текста; слова
-живут в `mind`.
+Ищем через Yandex Search API v2 (синхронный `/v2/web/search`).
+Ответ — Base64 XML в `rawData`. Наружу тот же контракт, что был у
+Tavily: `[{title, url, snippet}, ...]`.
 
 Автономная проверка:  `python web.py "что вчера случилось в Брянске"`
-Она печатает не только результаты, но и диагностику ответа (код,
-заголовок `server`, тип содержимого) — по ней сразу видно, ответило
-приложение Tavily или фильтр на пути.
 """
 
+from __future__ import annotations
+
+import base64
 import logging
+import os
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
-SEARCH_URL = "https://api.tavily.com/search"
+SEARCH_URL = "https://searchapi.api.cloud.yandex.net/v2/web/search"
 
-# Три — потолок, за которым блок в промпте начинает конкурировать с
-# памятью персонажа за внимание модели.
 MAX_RESULTS = 3
-
-# Гигиена транспорта, не рендер: бортик на то, что входит в процесс.
 SNIPPET_CHAR_LIMIT = 400
-
-# Сколько живёт найденное. Раньше срока не было вовсе, и это читалось как
-# «кэш умирает вместе с процессом» — верно для процесса длиной в разговор
-# и неверно для демона (3c), который живёт месяцами: там бессрочный кэш
-# превращается в вечную память о том, что нашлось в понедельник, причём
-# память невидимую — ретривер отчитывался бы в лог «ответ из кэша», а
-# персонаж уверенно пересказывал бы позапрошлую погоду.
-#
-# Час, а не двадцать минут, как у погоды: погода меняется сама, выдача
-# поиска — когда меняется мир. Порог на глаз и правится на живом, как
-# `RETRIEVER_COOLDOWN`.
 SEARCH_TTL_MINUTES = 60.0
 
-# Кэш живёт в процессе и умирает с ним — не память, а буфер (как
-# `_weather_cache` в `outside`). Заодно предохранитель от повторного
-# поиска одного и того же подряд. Значение — `(когда положили, результат)`.
 _search_cache: dict[tuple, tuple[datetime, list[dict]]] = {}
 
 
 def _clip(text: str, limit: int = SNIPPET_CHAR_LIMIT) -> str:
-    s = (text or "").strip()
+    s = " ".join((text or "").split())
     return s if len(s) <= limit else s[:limit].rstrip() + "..."
 
 
 def _evict_stale(now: datetime, ttl_minutes: float = SEARCH_TTL_MINUTES) -> None:
-    """Выбросить протухшее. Чистка на обращении, а не по таймеру.
-
-    Двумя строками закрывается вторая половина той же беды: без срока кэш
-    не только врал, но и рос без потолка — за месяц работы демона в нём
-    осело бы всё, что персонаж когда-либо искал. Отрицательный возраст
-    (часы прыгнули назад) считается негодным, как в `outside.weather`.
-    """
     ttl = timedelta(minutes=ttl_minutes)
     for key, (at, _) in list(_search_cache.items()):
         if not timedelta(0) <= now - at < ttl:
@@ -78,12 +43,6 @@ def _evict_stale(now: datetime, ttl_minutes: float = SEARCH_TTL_MINUTES) -> None
 
 
 def _describe_refusal(response: httpx.Response) -> str:
-    """Собрать из отказа то, что поможет отличить фильтр от сервиса.
-
-    Пустое тело или HTML вместо JSON — улика: отвечало не приложение.
-    Заголовок `server` обычно называет виновника прямо (`nginx` у
-    фильтра против `awselb` у Tavily).
-    """
     server = response.headers.get("server", "—")
     ctype = response.headers.get("content-type", "—")
     body = ""
@@ -92,9 +51,53 @@ def _describe_refusal(response: httpx.Response) -> str:
     except Exception:
         pass
     if "json" not in ctype.lower():
-        body = body or "тело пустое"
-        body += "  <- не JSON: похоже, ответил не Tavily, а фильтр на пути"
+        body = (body or "тело пустое") + "  <- не JSON"
     return f"server={server} | {ctype} | {body}"
+
+
+def _text(el) -> str:
+    if el is None:
+        return ""
+    return "".join(el.itertext()).strip()
+
+
+def _parse_yandex_xml(xml_text: str, max_results: int) -> list[dict]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as err:
+        logging.warning("search: XML не разобрался: %s", err)
+        return []
+    results = []
+    for doc in root.iter():
+        tag = doc.tag.split("}")[-1].lower()
+        if tag != "doc":
+            continue
+        fields = {}
+        passages = []
+        for child in list(doc):
+            name = child.tag.split("}")[-1].lower()
+            if name == "url":
+                fields["url"] = _text(child)
+            elif name == "title":
+                fields["title"] = _text(child)
+            elif name in ("headline", "modtime"):
+                fields.setdefault(name, _text(child))
+            elif name == "passages":
+                for p in child:
+                    if p.tag.split("}")[-1].lower() == "passage":
+                        passages.append(_text(p))
+        url = (fields.get("url") or "").strip()
+        snippet = _clip(" ".join(passages) or fields.get("headline") or "")
+        if not url or not snippet:
+            continue
+        results.append({
+            "title": (fields.get("title") or "").strip() or url,
+            "url": url,
+            "snippet": snippet,
+        })
+        if len(results) >= max_results:
+            break
+    return results
 
 
 def search(
@@ -105,36 +108,20 @@ def search(
     topic: str | None = None,
     days: int | None = None,
     now: datetime | None = None,
+    folder_id: str | None = None,
 ) -> list[dict] | None:
     """Поисковый запрос -> список результатов. Любая неудача -> `None`.
 
     Возвращает `[{title, url, snippet}, ...]`, не более `max_results`.
-
-    `topic="news"` вместе с `days` сужает выдачу до свежих новостей —
-    ровно та ручка, которой не хватало обычной выдаче: без неё запрос
-    «что вчера случилось в городе N» возвращает главные страницы
-    порталов, чьи описания говорят «здесь бывают новости», а не что
-    произошло. Пока не подключено к ретриверу: сперва надо увидеть, как
-    Tavily справляется без этого.
-
-    Отличие `None` от `[]` содержательное и доезжает до слов в `mind`:
-    `None` — «поиска не было» (нет ключа, упала сеть, сервис отказал),
-    `[]` — «искали, не нашли». Первое персонажу знать незачем, второе он
-    вправе произнести («глянул — ничего внятного»).
-
-    Ключ приходит параметром, а не читается из `config`: модуль-край не
-    лезет в настройки проекта. `now` — оттуда же и затем же, зачем он у
-    `outside.weather`: часы в этом проекте живут на краю и приходят
-    параметром. Не передали — за «сейчас» берётся системное время, и это
-    единственная поблажка, сделанная ради автономной проверки модуля.
+    `topic="news"` или `days<=1` — PERIOD_DAY и сортировка по времени.
     """
     q = (query or "").strip()
     if not q:
         return None
 
-    if not api_key:
-        # Штатная ситуация, не ошибка: ключа нет — проход выключен.
-        logging.info("search: ключ не задан, поиск выключен")
+    folder = (folder_id or os.getenv("YANDEX_FOLDER_ID") or "").strip()
+    if not api_key or not folder:
+        logging.info("search: нет ключа или YANDEX_FOLDER_ID — поиск выключен")
         return None
 
     at = now or datetime.now(timezone.utc)
@@ -146,17 +133,30 @@ def search(
         logging.info("search: ответ из кэша (%s)", q)
         return list(cached[1])
 
+    fresh = (topic or "").lower() == "news" or (days is not None and days <= 2)
     body = {
-        "api_key": api_key,
-        "query": q,
-        "max_results": max_results,
-        "search_depth": "basic",
-        "include_answer": False,
+        "query": {
+            "searchType": "SEARCH_TYPE_RU",
+            "queryText": q,
+            "familyMode": "FAMILY_MODE_NONE",
+            "fixTypoMode": "FIX_TYPO_MODE_ON",
+        },
+        "folderId": folder,
+        "responseFormat": "FORMAT_XML",
+        "l10n": "LOCALIZATION_RU",
+        "maxPassages": "2",
+        "groupSpec": {
+            "groupMode": "GROUP_MODE_DEEP",
+            "groupsOnPage": str(max(max_results, 3)),
+            "docsInGroup": "1",
+        },
     }
-    if topic:
-        body["topic"] = topic
-    if days:
-        body["days"] = days
+    if fresh:
+        body["period"] = "PERIOD_DAY"
+        body["sortSpec"] = {
+            "sortMode": "SORT_MODE_BY_TIME",
+            "sortOrder": "SORT_ORDER_DESC",
+        }
 
     try:
         response = client.post(
@@ -164,7 +164,7 @@ def search(
             json=body,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Api-Key {api_key}",
             },
         )
         response.raise_for_status()
@@ -181,55 +181,26 @@ def search(
         logging.warning("search: ответ не разобрался (%s): %s", q, err)
         return None
 
-    raw = (payload or {}).get("results")
-    if raw is None:
-        logging.warning("search: в ответе нет блока results")
+    raw = (payload or {}).get("rawData")
+    if not raw:
+        logging.warning("search: в ответе нет rawData")
         return None
-    if not isinstance(raw, list):
-        logging.warning("search: results не список, а %s", type(raw).__name__)
+    try:
+        xml_text = base64.b64decode(raw).decode("utf-8", errors="replace")
+    except (ValueError, TypeError) as err:
+        logging.warning("search: rawData не декодируется: %s", err)
         return None
 
-    # Отбираем **до** среза, а не после: записи без ссылки или без текста
-    # иначе съедали бы слоты, и три пустых результата впереди оставили бы
-    # нас без единого годного.
-    results = []
-    for item in raw:
-        if len(results) >= max_results:
-            break
-        if not isinstance(item, dict):
-            continue
-        url = str(item.get("url") or "").strip()
-        snippet = _clip(str(item.get("content") or ""))
-        if not url or not snippet:
-            continue
-        results.append({
-            "title": str(item.get("title") or "").strip() or url,
-            "url": url,
-            "snippet": snippet,
-        })
-
-    # Пустой список кэшируем тоже: повторять бесплодный запрос подряд
-    # незачем.
+    results = _parse_yandex_xml(xml_text, max_results)
     _search_cache[key] = (at, list(results))
     if not results:
         logging.info("search: ничего не нашлось (%s)", q)
+    else:
+        logging.info("search: яндекс, %s шт. (%s)", len(results), q)
     return results
 
 
-def build_search_client(timeout: float = 8.0) -> httpx.Client:
-    """Клиент для поиска: **мимо прокси проекта**, но со своим, если задан.
-
-    `trust_env=False` — не смотреть в системные `HTTP_PROXY`/`HTTPS_PROXY`:
-    именно они утаскивали запрос в прокси, который поисковые домены не
-    пропускает. Свой прокси для поиска задаётся отдельной переменной
-    `SEARCH_PROXY_URL`, чтобы два канала (модель и поиск) не путались.
-
-    Живёт здесь, а не в `main`, чтобы автономная проверка ходила ровно
-    тем же путём, что и программа: иначе «у меня скрипт работает, а в
-    приложении нет» останется неразрешимым.
-    """
-    import os
-
+def build_search_client(timeout: float = 15.0) -> httpx.Client:
     proxy = (os.getenv("SEARCH_PROXY_URL") or "").strip() or None
     return httpx.Client(
         timeout=httpx.Timeout(timeout),
@@ -240,28 +211,27 @@ def build_search_client(timeout: float = 8.0) -> httpx.Client:
 
 
 if __name__ == "__main__":
-    # Автономная проверка: python web.py "что вчера случилось в Брянске"
-    import os
     import sys
-
     from dotenv import load_dotenv
-
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-
-    key = os.getenv("TAVILY_API_KEY", "")
+    key = (
+        os.getenv("YANDEX_SEARCH_API_KEY")
+        or os.getenv("SEARCH_API_KEY")
+        or os.getenv("TAVILY_API_KEY")
+        or ""
+    )
+    folder = os.getenv("YANDEX_FOLDER_ID", "")
     proxy = (os.getenv("SEARCH_PROXY_URL") or "").strip()
     text = " ".join(sys.argv[1:]) or "новости сегодня"
-
-    print(f"ключ:   {'задан, ' + str(len(key)) + ' симв, начинается с ' + key[:9] if key else 'НЕ ЗАДАН'}")
-    print(f"прокси: {proxy or 'нет (идём напрямую)'}")
+    print(f"ключ:   {'задан, ' + str(len(key)) + ' симв.' if key else 'НЕ ЗАДАН'}")
+    print(f"folder: {folder or 'НЕ ЗАДАН'}")
+    print(f"прокси: {proxy or 'нет'}")
     print(f"запрос: {text}\n")
-
     with build_search_client() as c:
-        found = search(text, c, key)
-
+        found = search(text, c, key, topic="news", days=1)
     if found is None:
-        print("\nрезультат: None — поиска не было, причина в строке WARNING выше.")
+        print("\nрезультат: None — поиска не было.")
     elif not found:
         print("\nрезультат: пусто — искали, ничего не нашли.")
     else:
