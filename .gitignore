@@ -16,3 +16,4 @@ agent/fixture_state.json
 
 agent/library/
 agent/library/*
+agent/var/
