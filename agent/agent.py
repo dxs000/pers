@@ -4,6 +4,7 @@ import logging
 import signal
 import sys
 import time
+import logsetup
 from datetime import datetime, timezone
 
 import config
@@ -495,6 +496,8 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
+
+    logsetup.attach()
         
     # До всего остального: пояс участвует и в рождении (дата), и в ночи, и в
     # сроках обещаний. Ошибиться в нём молча дороже, чем не запуститься.
