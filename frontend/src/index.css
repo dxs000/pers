@@ -248,3 +248,39 @@ body {
   font-size: 1.15rem;
   line-height: 1.6;
 }
+
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.tabs button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 0.15rem 0.2rem;
+}
+
+.tabs button.on {
+  color: var(--fg);
+}
+
+.log-stage {
+  align-items: stretch;
+  justify-content: flex-start;
+  padding: 0;
+}
+
+.agent-log {
+  margin: 0;
+  padding: 1rem 1.75rem 2rem;
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: #cbbca6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
