@@ -8,14 +8,16 @@ from typing import Any, Callable
 
 import config
 import genesis
+import library
 import outside
 import sky as sky_mod
 import timeutil
 import web
-from mind import (VERDICT_WRITE, build_system_prompt, check_memory,
-                  decide_query, dream, dream_subject, extract_memories,
-                  extract_objects, linger, notice_promise, propose_birthplaces,
-                  propose_names, reflect_mood, reflect_self, reflect_traits,
+from mind import (CONSPECTUS_LIMIT, VERDICT_WRITE, build_system_prompt,
+                  check_memory, choose_book, decide_query, dream,
+                  dream_subject, extract_memories, extract_objects, linger,
+                  notice_promise, propose_birthplaces, propose_names,
+                  read_portion, reflect_mood, reflect_self, reflect_traits,
                   day, say_promise, speak_first, weather_family)
 from snapshot import SESSION_GAP_HOURS, clip_text, iso
 from openai import OpenAI, OpenAIError
@@ -873,6 +875,16 @@ def background_tick(eng, edges: Edges, now: datetime, *,
         # услышал одну реплику, а не реплику про погоду. Тишина гасится сама —
         # `append_utterance` сдвинул `last_utterance`.
         eng.damp_impulses(IMPULSE_DAMP)
+        # Сказал про книгу — нерассказанное о ней перестало быть
+        # нерассказанным (Шаг 49). Помечаются ВСЕ нерассказанные, а не одна
+        # «та самая»: связи «повод — заметка» в базе нет, и заводить колонку
+        # под один род повода значило бы угадывать схему (`0011_reading.sql`
+        # отклонил связь книги с нитью по тому же доводу). Заметок между
+        # двумя репликами накапливается одна-две, и цена ошибки — мысль,
+        # которую он не проговорил вслух, но которая осталась в базе и в
+        # промпте.
+        if impulse["kind"] == "reading":
+            eng.mark_notes_told([n["id"] for n in eng.untold_notes()], now)
         eng.remember_outside(snap, wx, now, weather_family(wx))
         # Вспомненное отмечается только когда персонаж ЗАГОВОРИЛ, а не когда
         # промпт собрался. Промолчавшая модель прочла память и ничего с ней
@@ -1000,6 +1012,242 @@ def dream_tick(eng, edges: Edges, now: datetime, *, tz=None) -> str | None:
 
     logging.info("приснилось: %s", seen["dream"][:80])
     return seen["dream"]
+
+
+# =============================================================================
+# Чтение (Шаг 49): дело, которого нельзя выдумать
+# =============================================================================
+# **Первый проход, у которого результат лежит вне базы.** Всё, что персонаж
+# «делал» до сих пор, сочинял вечерний проход из его же канона: текст о тексте,
+# и спорить с ним нечем. Прочитанная страница либо прочитана, либо нет, и
+# позиция в файле знает об этом больше, чем модель.
+#
+# **Заход делает ОДНО из двух: берёт книгу или читает.** Не оба подряд: взяв
+# книгу, персонаж не садится читать её в ту же минуту — он взял её и пошёл
+# дальше, а вечер чтения придёт своим чередом. Слитые вместе, они стоили бы
+# двух вызовов модели на одном круге, и первый вечер новой книги отличался бы
+# от прочих вдвое.
+#
+# **Заслонок три, и они те же по природе, что у сна и дня:**
+#   часы        — читает он не ночью и не в пять утра. Окно широкое (день и
+#                 вечер), потому что чтение, в отличие от сна и итога дня, к
+#                 часу не привязано: человек читает, когда выдалось время;
+#   тишина      — если собеседник рядом, персонаж не читает. Порог тот же час,
+#                 что у сна и дня;
+#   интервал    — не чаще раза в шесть часов, а у подхода к полке — раза в
+#                 сутки. Числа выбраны от жизни, как `PORTION_CHARS`: два-три
+#                 захода в сутки — это человек, который много читает, но не
+#                 машина, глотающая роман за день; к полке же подходят реже,
+#                 чем садятся за начатую книгу. Почему интервала два, а не
+#                 один, сказано у `CHOICE_INTERVAL_HOURS`.
+#
+# Метка интервала — `agent.read_at`, и двигается она ВСЕГДА, в том числе когда
+# персонаж отказался брать книгу и когда модель не ответила. Почему её
+# пришлось завести, хотя `0011_reading.sql` объявил её ненужной, разобрано в
+# `0012_reading_pass.sql`.
+
+READING_HOUR_FROM = 9        # раньше — он ещё не проснулся
+READING_HOUR_TO = 24         # позже — ночь, и это время сна, а не книги
+READING_QUIET_HOURS = 1.0    # столько никто не пишет — считаем, что он один
+READING_INTERVAL_HOURS = 6.0 # не чаще; два-три захода в сутки
+
+# Подход к полке — дело РЕЖЕ чтения, и разведены они после первого живого
+# прогона (Шаг 49.2). Причина не в цене вызова, а в том, что отказ не
+# оставляет следа и не может оставить: мир между заходами не меняется — та же
+# полка, те же нити, то же настроение, — и персонаж, сказавший «не сегодня»,
+# скажет это же через шесть часов теми же словами. Четыре одинаковых вызова
+# в сутки ради ответа, известного заранее.
+#
+# Соблазн — помнить отказы («ты уже трижды проходил мимо»). Отвергнут: это
+# полка «хочу прочитать» с другой стороны, то есть список, который никто не
+# сокращает, и `0011_reading.sql` отклонил его поимённо. Сутки — не память, а
+# такт: человек и правда подходит к полке примерно раз в день, а садится
+# читать чаще, потому что книга уже у него в руках.
+CHOICE_INTERVAL_HOURS = 24.0
+
+# Повод рассказать о прочитанном. Ниже сна (1.5) и вровень с погодой (1.2):
+# мысль на полях — не новость и не событие, но и не пустяк. Порядок между
+# поводами задаётся этими числами и больше ничем.
+READING_URGE = 1.2
+
+# Двадцать часов. Дольше сна (14), потому что прочитанное вчера остаётся
+# уместным дольше, чем приснившееся; короче любопытства (72), потому что
+# мысль о книге, высказанная через три дня, — уже не мысль, а рецензия.
+READING_TTL_HOURS = 20.0
+
+# Обрезка предмета повода. Заметка целиком (300) вытолкнула бы из ремарки всё
+# остальное; здесь нужен не пересказ мысли, а напоминание о ней.
+READING_SUBJECT_LIMIT = 140
+
+# Слова закрытия книги. Разницу несёт именно слово (`0011_reading.sql`), и
+# причина брошенного дописывается к нему: «бросил» без «почему» через месяц
+# ничего не объясняет.
+BOOK_DONE = "дочитал"
+BOOK_QUIT = "бросил"
+
+
+def reading_tick(eng, edges: Edges, now: datetime, *, tz=None,
+                 force: bool = False) -> str | None:
+    """Один заход чтения. `None` — не время, не с чем или не вышло.
+
+    `force` снимает ТОЛЬКО заслонки времени и оставляет всё остальное. Он для
+    `agent.py --read`, то есть для человека, который хочет посмотреть на проход
+    сейчас, а не ждать шести часов. Запись при этом настоящая: порция читается
+    по-настоящему, позиция двигается по-настоящему, и «прогона вхолостую» тут
+    нет и быть не может — прочитанное необратимо.
+    """
+    tz = tz or config.TZ
+    if not force:
+        local = now.astimezone(tz)
+        if not (READING_HOUR_FROM <= local.hour < READING_HOUR_TO):
+            return None
+
+        stamps = [t for t in (eng.last_exchange(), eng.last_utterance()) if t]
+        if stamps:
+            idle = (now - max(stamps)).total_seconds() / 3600.0
+            if 0.0 <= idle < READING_QUIET_HOURS:
+                return None
+
+        settled = eng.read_at()
+        if settled is not None:
+            hours = (now - settled).total_seconds() / 3600.0
+            if 0.0 <= hours < READING_INTERVAL_HOURS:
+                return None
+            # Длинный интервал спрашивается ТОЛЬКО у того, у кого книги на
+            # руках нет, и спрашивается после короткого. Порядок экономит не
+            # красоту: `current_book` — лишний запрос, и стой он выше, он
+            # платился бы каждую минуту дежурства. Здесь он платится в окне
+            # между шестью и двадцатью четырьмя часами после прошлого захода,
+            # то есть несколько раз в сутки.
+            if hours < CHOICE_INTERVAL_HOURS and eng.current_book() is None:
+                return None
+
+    book = eng.current_book()
+    if book is None:
+        return _take_book(eng, edges, now)
+    return _read_book(eng, edges, book, now)
+
+
+def _take_book(eng, edges: Edges, now: datetime) -> str | None:
+    """Подойти к полке. `None` — не взял, и это обычный исход.
+
+    **Пустая полка метку НЕ двигает.** Отказ персонажа и отсутствие книг —
+    разные вещи: первое его решение, второе обстоятельство. Двинь мы метку на
+    пустой полке, положенная в неё книга ждала бы до шести часов, а стоит
+    проверка одну короткую выборку — дешевле, чем заслонка, которая её
+    экономит.
+    """
+    shelf = eng.shelf_state()
+    if not shelf.get("free"):
+        return None
+
+    turn = eng.snapshot(now)
+    got = choose_book(turn, shelf, edges.llm)
+
+    # Метка и взятие — ОДНОЙ единицей. Иначе возможно состояние «книга взята,
+    # метка не двинута», и следующий круг через минуту застал бы персонажа с
+    # книгой в руках и позвал бы читать: первый вечер новой книги стал бы
+    # двойным.
+    with eng.unit():
+        eng.set_read_at(now)
+        row = eng.pick_book(got["text_path"], got["why"], now) if got else None
+
+    if got is None:
+        # Почему не взял, сказал разбор (`_parse_choice`): отказ или
+        # непонятый ответ, и словами самого персонажа. Здесь — только то,
+        # чего разбор не знает: сколько книг перед ним лежало.
+        logging.info("полка: %s свободных книг, ни одной не взял",
+                     len(shelf["free"]))
+        return None
+    if row is None:
+        # Условный UPDATE не сработал: книгу взяли в другом месте или она уже
+        # открыта. Не ошибка — гонка, и правильный исход у неё именно такой.
+        logging.warning("книгу взять не вышло: %s", got["text_path"])
+        return None
+
+    logging.info("взял книгу: %s — %s", row["title"], got["why"])
+    return f"взял «{row['title']}»"
+
+
+def _read_book(eng, edges: Edges, book, now: datetime) -> str | None:
+    """Прочитать одну порцию. `None` — не прочитал.
+
+    **Позиция двигается только вместе с записанным конспектом, и только если
+    она не уехала.** Обе половины этого правила живут в `store_pg`
+    (`advance_reading`), а здесь — его следствие: неудачный вызов модели НЕ
+    двигает позицию, потому что кусок, засчитанный прочитанным без чтения,
+    пропадает из книги навсегда.
+    """
+    position = int(book["position"])
+    if position >= int(book["length"]):
+        # Позиция дошла до конца, а книга не закрыта: так выглядит прошлый
+        # заход, упавший между сдвигом и закрытием. Чинится здесь и молча —
+        # читать нечего, значит дочитал.
+        with eng.unit():
+            eng.set_read_at(now)
+            eng.close_book(book["id"], now, BOOK_DONE)
+        logging.info("дочитал: %s", book["title"])
+        return f"дочитал «{book['title']}»"
+
+    got = library.portion(book["text_path"], position)
+    if got is None:
+        # Файл пропал или не читается. Метка двигается, чтобы не молотить
+        # диск и лог каждую минуту; о пропаже громко говорит `sync_shelf` при
+        # подъёме, и чинится это руками — книгу вернуть на полку.
+        with eng.unit():
+            eng.set_read_at(now)
+        logging.warning("читать нечем, книга недоступна: %s", book["text_path"])
+        return None
+
+    turn = eng.snapshot(now)
+    conspectus = eng.conspectus_so_far(book["id"], CONSPECTUS_LIMIT)
+    out = read_portion(turn, book, got, conspectus, edges.llm)
+    if out is None:
+        # Метка двигается и при неудаче — прецедент `traits_at`: повторять
+        # тот же промах через минуту на тех же входах незачем. Позиция при
+        # этом стоит, и кусок будет прочитан следующим заходом.
+        with eng.unit():
+            eng.set_read_at(now)
+        return None
+
+    with eng.unit():
+        eng.set_read_at(now)
+        reading_id = eng.advance_reading(
+            book["id"], got["from_pos"], got["to_pos"], out["conspectus"], now)
+        if reading_id is None:
+            # Позиция уехала, пока ходили в модель. Всё или ничего: конспект
+            # лёг бы не к тому куску.
+            logging.warning("позиция уехала, пока он читал: %s",
+                            book["title"])
+            return None
+        if out["note"]:
+            eng.add_note(book["id"], reading_id, out["note"], now,
+                         got["from_pos"])
+            eng.record_urge("reading",
+                            clip_text(out["note"], READING_SUBJECT_LIMIT),
+                            READING_URGE, now,
+                            now + timedelta(hours=READING_TTL_HOURS))
+        # Бросить можно и на последней порции, и тогда это «бросил», а не
+        # «дочитал»: слово должно говорить о человеке, а не о позиции.
+        if out["quit"]:
+            eng.close_book(book["id"], now, f"{BOOK_QUIT}: {out['quit']}")
+        elif got["done"]:
+            eng.close_book(book["id"], now, BOOK_DONE)
+
+    read = got["to_pos"] - got["from_pos"]
+    logging.info("прочитал %s знаков, %s: %s (%.0f%%)",
+                 read, book["title"],
+                 (out["conspectus"] or "конспекта нет")[:60],
+                 100.0 * got["progress"])
+    if out["note"]:
+        logging.info("мысль на полях: %s", out["note"][:80])
+    if out["quit"]:
+        logging.info("бросил: %s — %s", book["title"], out["quit"])
+        return f"бросил «{book['title']}»"
+    if got["done"]:
+        logging.info("дочитал: %s", book["title"])
+        return f"дочитал «{book['title']}»"
+    return f"прочитал {read} знаков «{book['title']}»"
 
 
 # =============================================================================

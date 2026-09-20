@@ -127,6 +127,22 @@ class PgEngine:
     def all_books(self) -> list[dict]:
         return self._pg.all_books(self.conn)
 
+    # Метка захода чтения (Шаг 49). Лежит в `agent`, а не в `books`, потому
+    # что отвечает на вопрос, который к книге не привязан: «когда он вообще
+    # садился читать». У захода, кончившегося отказом взять книгу, книги нет,
+    # а заход был — см. `0012_reading_pass.sql`.
+    #
+    # Сырым SQL, как `day_at` рядом: обе метки — одно поле одной строки, и
+    # заводить ради них функции в `store_pg` значило бы писать обёртку над
+    # обёрткой.
+    def read_at(self):
+        row = self.conn.execute(
+            "SELECT read_at FROM agent WHERE id = 1").fetchone()
+        return row["read_at"] if row else None
+
+    def set_read_at(self, now: datetime) -> None:
+        self.conn.execute("UPDATE agent SET read_at = %s WHERE id = 1", (now,))
+
     # --- День (Шаг 46) -------------------------------------------------------
     def last_lived(self):
         return self._pg.last_lived(self.conn)

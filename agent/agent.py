@@ -272,6 +272,16 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
             return
     except Exception as err:
         logging.warning("сон не приснился: %s", err)
+    # Чтение (Шаг 49) — после сна и до черт. Порядок тот же, по цене отказа:
+    # первая проверка у него часовая, то есть бесплатная, как ночь у сна.
+    # Перед днём и сном он не встаёт намеренно: у тех окна узкие (вечер, ночь)
+    # и пропущенный заход возвращается только через сутки, а у чтения окно в
+    # пятнадцать часов — уступить круг ему ничего не стоит.
+    try:
+        if cycle.reading_tick(eng, edges, now) is not None:
+            return
+    except Exception as err:
+        logging.warning("чтение не состоялось: %s", err)
     try:
         if cycle.reconsider_traits(eng, edges, now) is not None:
             return
@@ -313,6 +323,39 @@ def serve(eng, edges: cycle.Edges) -> None:
             # плана дал бы следующий заход сразу же, догоняя расписание.
             # Фону догонять нечего.
             next_background = time.monotonic() + BACKGROUND_SECONDS
+
+
+def cmd_read() -> int:
+    """Один заход чтения прямо сейчас (Шаг 49).
+
+    **Предохранителя вроде `--write` у генезиса тут нет, и это не оплошность.**
+    Чтение необратимо ровно в том смысле, в каком необратим прожитый вечер:
+    страницы прочитаны, позиция сдвинулась, — но переиграть тут нечего, это и
+    есть нормальная работа прохода. Сухого прогона у него быть не может:
+    единственный способ узнать, что он прочитал, — дать ему прочитать.
+
+    Смысл команды — не «прогнать тест», а не ждать шести часов, глядя в лог.
+    Демон при этом может быть запущен: оба ходят через `advance_reading` с
+    условием на позицию, и одновременный заход кончится отказом, а не двойным
+    чтением.
+    """
+    edges = cycle.open_edges()
+    eng = engine_mod.open_engine()
+    try:
+        sync_shelf(eng)
+        got = cycle.reading_tick(eng, edges, datetime.now(timezone.utc),
+                                 force=True)
+    finally:
+        eng.close()
+        edges.close()
+    if got is None:
+        # Причину называет лог, и называет точно: пустая полка, отказ его
+        # словами или непонятый ответ модели. Перечислять их здесь заново
+        # значило бы гадать вслух там, где рядом напечатан ответ.
+        print("заход состоялся, читать не стал — причина строкой выше")
+        return 1
+    print(got)
+    return 0
 
 
 def cmd_genesis(first_text: str, write: bool) -> int:
@@ -436,6 +479,8 @@ def main() -> int:
                             help="записать рождение (необратимо)")
     parser.add_argument("--text", default="привет",
                             help="первые слова, сказанные персонажу")
+    parser.add_argument("--read", action="store_true",
+                            help="один заход чтения сейчас, минуя заслонки времени")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -453,6 +498,8 @@ def main() -> int:
 
     if args.genesis:
         return cmd_genesis(args.text, write=args.write)
+    if args.read:
+        return cmd_read()
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     try:

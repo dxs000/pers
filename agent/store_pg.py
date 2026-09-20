@@ -1041,10 +1041,14 @@ def _fill_fixture(conn, state: dict) -> None:
         -- та же самая, что описана выше про `last_search_ts`, — и повторилась
         -- она ровно потому, что перечень поимённый: он ничего не забывает
         -- сам, но и не напоминает о новом.
+        -- `read_at` дописан Шагом 49 — тем же движением и по третьему разу.
+        -- Метка захода чтения переживает `TRUNCATE` (строка `agent` одна),
+        -- и не сбрось её здесь, читающий сценарий видел бы водяной знак от
+        -- соседа: заход, обязанный состояться, молчал бы по интервалу.
         UPDATE agent SET name=%s, born_at=%s, birthplace=%s, traits=%s, mood=%s,
                place_label=%s, place_lat=%s, place_lon=%s, outside_latch=%s,
                last_exchange_ts=%s, last_search_ts=NULL, traits_at=%s,
-               mood_reason=%s, mood_since=%s, day_at=NULL
+               mood_reason=%s, mood_since=%s, day_at=NULL, read_at=NULL
          WHERE id = 1
         """,
         (
