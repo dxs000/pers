@@ -14,7 +14,10 @@ import outside
 import sky
 import store_pg
 import timeutil
+import essay as essay_mod
 from mind import summarize_session
+import shelf_choice
+cycle.choose_book = shelf_choice.choose_book
 
 POLL_SECONDS = 5.0
 
@@ -282,6 +285,11 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
             return
     except Exception as err:
         logging.warning("чтение не состоялось: %s", err)
+    try:
+        if essay_mod.essay_tick(eng, edges, now) is not None:
+            return
+    except Exception as err:
+        logging.warning("эссе не состоялось: %s", err)    
     try:
         if cycle.reconsider_traits(eng, edges, now) is not None:
             return
