@@ -11,6 +11,9 @@ export default function App() {
   const [live, setLive] = useState(false);
   const [shelf, setShelf] = useState(null);
   const [convert, setConvert] = useState(null);
+  const [tab, setTab] = useState("talk");
+  const [agentLog, setAgentLog] = useState({ lines: [], missing: false });
+  const logEndRef = useRef(null);
   const inboxIdRef = useRef(null);
   const fileRef = useRef(null);
 
@@ -79,6 +82,27 @@ export default function App() {
   }, [status]);
 
   useEffect(() => {
+    if (tab !== "log") return;
+    let stop = false;
+    async function pull() {
+      const res = await fetch(`${API}/log`);
+      if (!res.ok || stop) return;
+      setAgentLog(await res.json());
+    }
+    pull();
+    const timer = setInterval(pull, 2000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [tab]);
+
+  useEffect(() => {
+    if (tab !== "log") return;
+    logEndRef.current?.scrollIntoView({ block: "end" });
+  }, [tab, agentLog.lines]);
+
+  useEffect(() => {
     if (!convert?.id || convert.state !== "running") return;
     const timer = setInterval(async () => {
       const res = await fetch(`${API}/shelf/convert/${convert.id}`);
@@ -140,6 +164,22 @@ export default function App() {
           </p>
         </div>
         <div className="top-right">
+          <nav className="tabs">
+            <button
+              type="button"
+              className={tab === "talk" ? "on" : ""}
+              onClick={() => setTab("talk")}
+            >
+              разговор
+            </button>
+            <button
+              type="button"
+              className={tab === "log" ? "on" : ""}
+              onClick={() => setTab("log")}
+            >
+              лог
+            </button>
+          </nav>
           <span className={live ? "live on" : "live"}>
             {live ? "канал жив" : "канал тих"}
           </span>
@@ -183,6 +223,7 @@ export default function App() {
         ) : null}
       </div>
 
+      {tab === "talk" ? (
       <main className="stage">
         {log.length === 0 ? (
           <div className="empty">
@@ -202,7 +243,26 @@ export default function App() {
           </div>
         )}
       </main>
+      ) : (
+      <main className="stage log-stage">
+        {agentLog.missing ? (
+          <div className="empty">
+            <h2>Файла лога ещё нет</h2>
+            <p>
+              Демон пишет в AGENT_LOG (по умолчанию agent/var/agent.log).
+              После перезапуска agent.py строки появятся здесь.
+            </p>
+          </div>
+        ) : (
+          <pre className="agent-log">
+            {(agentLog.lines || []).join("\n")}
+            <span ref={logEndRef} />
+          </pre>
+        )}
+      </main>
+      )}
 
+      {tab === "talk" && (
       <footer className="composer">
         <form onSubmit={send}>
           <textarea
@@ -232,6 +292,7 @@ export default function App() {
         )}
         {busy && <p>персонаж думает…</p>}
       </footer>
+      )}
     </div>
   );
 }
