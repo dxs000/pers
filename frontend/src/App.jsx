@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import EssayBar from "./EssayBar";
 
 const API = import.meta.env.VITE_API_URL;
 const RECONNECT_MS = 3_000;
@@ -38,6 +39,8 @@ export default function App() {
   useEffect(() => {
     loadSession();
     loadShelf();
+    const timer = setInterval(loadShelf, 20_000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -214,6 +217,7 @@ export default function App() {
         {holding?.notes?.[0] ? (
           <p className="shelf-note">{holding.notes[0]}</p>
         ) : null}
+        <EssayBar essay={shelf?.essay} />
         {convert ? (
           <p className="shelf-job">
             {convert.state === "running" && `конвертирую ${convert.file || "книгу"}…`}
