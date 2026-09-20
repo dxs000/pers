@@ -79,6 +79,7 @@ pg-прогоне брался из файла, единственное мес�
 import argparse
 import difflib
 import json
+import tempfile
 from dataclasses import asdict, dataclass
 import sys
 from datetime import datetime, timedelta, timezone
@@ -86,7 +87,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import build_fixture
+# `config` и `library` — только ради сценария чтения (Шаг 51). Полка у него
+# НАСТОЯЩАЯ: файлы на диске, спутники, каталог, нарезка на порции. Заглушка
+# вместо `library` проверяла бы сбрую против самой себя, а весь смысл чтения в
+# том, что источник лежит вне головы персонажа и вне его базы.
+import config
 import cycle
+import library
 from openai import OpenAIError
 # Модулем целиком, а не именами: сценарий биографии зовёт `mind` как зовёт
 # его `cycle` — проходом за проходом, — и `mind.VERDICT_WRITE` рядом с
@@ -790,9 +797,14 @@ _MOOD = {"mood": None}
 # заслонке, и рядом они читаются, а поодиночке — нет.
 _PROMISES = {"promises": None}
 
+# Семнадцатое семейство: чтение (Шаг 51). Единственный сценарий, которому
+# нужен диск: полка раскладывается во временный каталог и убирается за
+# собой. Подробности — у `_run_reading`.
+_READING = {"reading": None}
+
 SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
              **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
-             **_BIRTH, **_INSPECT, **_HTTP, **_GENESIS}
+             **_READING, **_BIRTH, **_INSPECT, **_HTTP, **_GENESIS}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
 #
@@ -1873,6 +1885,275 @@ def _run_day() -> str:
     )
 
 
+# --- Сценарий ЧТЕНИЯ (Шаг 51) -----------------------------------------------
+# Семнадцатое семейство и первое, у которого ВХОД ЛЕЖИТ НА ДИСКЕ. У всех
+# прочих сценариев состояние целиком в фикстуре; здесь к нему добавляется
+# полка — файлы, спутники, длины, — и добавляется настоящая, а не заглушкой.
+# Заглушка вместо `library` проверяла бы сбрую против самой себя: весь смысл
+# Шага 49 в том, что прочитанная страница либо прочитана, либо нет, и знает
+# об этом файл, а не модель.
+#
+# **Книга синтетическая и порождается функцией.** Положить в репозиторий
+# настоящий текст нельзя (чужие права, мегабайты в диффе), а главное — не
+# нужно: проходу безразлично, что написано в порции, ему важно, ГДЕ она
+# кончается. Генератор детерминирован при фиксированных параметрах, как
+# `genesis.draw` при фиксированном моменте.
+#
+# **Заходов девять, и ни один не лишний.** Порознь заслонки неразличимы:
+# «не те часы», «рядом собеседник», «уже подходил к полке» и «уже читал»
+# выглядят одинаково — проход вернул `None`. Рядом они читаются.
+#
+#   1. 05:00              -> молчит: не те часы
+#   2. 13:00, говорили 10 мин назад -> молчит: рядом собеседник
+#   3. 13:00, тихо три часа -> подошёл к полке и ОТКАЗАЛСЯ
+#   4. +7 ч               -> молчит: книги нет, а к полке подходят раз в сутки
+#   5. +25 ч              -> подошёл снова и взял
+#   6. +26 ч              -> молчит: за книгу садятся не чаще раза в шесть часов
+#   7. +32 ч              -> первая порция, с мыслью на полях
+#   8. +44 ч              -> вторая порция, БЕЗ мысли (законный исход)
+#   9. +50 ч              -> третья, последняя: дочитал и закрыл
+#
+# Четвёртый заход держит под током Шаг 49.2 — разведение интервалов. Он
+# единственный, где отказ объясняется не чтением, а подходом к полке, и
+# слить его с шестым нельзя: там шесть часов пускают, а тут не пускают
+# двадцать четыре.
+#
+# Восьмой держит ветку «порция прочитана, слов не нашлось» (`0011_reading.sql`):
+# позиция обязана сдвинуться, а повода заговорить обязано не появиться.
+#
+# В хвосте артефакта — вход ВЕЧЕРНЕГО прохода (Шаг 50): `deeds_between` за
+# окно и блок, который из него собирается. Отдельного сценария под это не
+# заводится намеренно: проверять «что день увидит» на дне, у которого ничего
+# не случилось, нечем, а здесь случилось всё.
+
+READ_NIGHT = NOW - timedelta(hours=8)    # 05:00 по месту
+READ_NOON = NOW                          # 13:00
+READ_LATER = NOW + timedelta(hours=7)    # 20:00, но книги нет
+READ_NEXT = NOW + timedelta(hours=25)    # 14:00 следующего дня
+READ_SOON = NOW + timedelta(hours=26)    # 15:00, слишком рано
+READ_ONE = NOW + timedelta(hours=32)     # 21:00
+READ_TWO = NOW + timedelta(hours=44)     # 09:00
+READ_THREE = NOW + timedelta(hours=50)   # 15:00
+
+_READING_SCRIPT = [
+    ("выбор", '{"take": null, "why": "Обе слишком толстые для сегодняшнего '
+              'вечера, а тонкого не хочется"}'),
+    ("выбор", '{"take": 1, "why": "Название висело перед глазами весь день, '
+              'взял чтобы отвязалось"}'),
+    ("чтение", '{"conspectus": "Начало: кто-то идёт от окна к двери и обратно, '
+               'считает шаги. Ничего не объясняется.", '
+               '"note": "Я тоже считал шаги до угла, только вслух не '
+               'признавался.", "quit": null}'),
+    ("чтение", '{"conspectus": "Вторая глава: дорога, хлеб, снег. Тот же '
+               'счёт, но уже не шагов.", "note": null, "quit": null}'),
+    ("чтение", '{"conspectus": "Конец: всё то же, и это, видимо, и есть '
+               'ответ.", "note": "Кончилось ничем, и мне это понравилось '
+               'больше, чем если бы кончилось чем-нибудь.", "quit": null}'),
+]
+
+# Слова книги. Список фиксированный, порядок фиксированный — от него зависят
+# и длина текста, и границы порций, то есть числа в эталоне.
+_BOOK_WORDS = ("ветер", "стол", "вода", "шаг", "окно", "бумага", "свет",
+               "дорога", "голос", "камень", "время", "рука", "дверь",
+               "хлеб", "снег", "письмо")
+
+# Через сколько абзацев ставится заголовок. Заголовки нужны не для красоты:
+# `library.chapter_at` ищет их, и без них ветка «глава известна» осталась бы
+# непроверенной — а у половины настоящих книг (PDF) её и правда нет.
+_BOOK_CHAPTER_EVERY = 40
+
+
+def _fake_paragraph(n: int) -> str:
+    """Абзац номер `n`. Чистая функция номера — в этом весь смысл."""
+    out = []
+    for s in range(4):
+        count = 12 + (n + s) % 7
+        words = [_BOOK_WORDS[(n * 7 + s * 3 + i) % len(_BOOK_WORDS)]
+                 for i in range(count)]
+        out.append(" ".join(words).capitalize() + ".")
+    return " ".join(out)
+
+
+def _fake_book(target: int) -> str:
+    """Текст примерно в `target` знаков. Абзацы через пустую строку — как их
+    пишет `convert.py`, потому что по ним режется порция."""
+    parts: list[str] = []
+    total = 0
+    n = 0
+    while total < target:
+        if n and n % _BOOK_CHAPTER_EVERY == 0:
+            parts.append(f"## Глава {n // _BOOK_CHAPTER_EVERY + 1}")
+            total += len(parts[-1]) + 2
+        parts.append(_fake_paragraph(n))
+        total += len(parts[-1]) + 2
+        n += 1
+    return "\n\n".join(parts)
+
+
+# Полка сценария: толстая книга на три порции и тонкая, которую он не возьмёт.
+# Вторая не для симметрии: проход выбора обязан ВИДЕТЬ выбор, иначе «взял
+# единственное» неотличимо от «выбрал».
+_SHELF = (
+    ("schet-shagov", "Счёт шагов", "А. Н. Вымышленный", 50_000),
+    ("tonkaya-tetrad", "Тонкая тетрадь", None, 6_000),
+)
+
+
+def _make_shelf(root: Path) -> None:
+    """Разложить полку на диске: `.md` рядом со спутником `.json`.
+
+    Форма спутника — та, что пишет `convert.py`, и знание о ней тут копией не
+    становится: читает его `library.catalog`, и разойдись они — покраснеет
+    этот сценарий, а не живой запуск через месяц.
+
+    `newline=""` по тому же доводу, что в `library._read`: трансляция перевода
+    строк изменила бы длину файла относительно записанной в спутнике, то есть
+    ровно ту величину, на которой держится позиция чтения.
+    """
+    text_dir = root / library.TEXT_DIR
+    text_dir.mkdir(parents=True, exist_ok=True)
+    for name, title, author, target in _SHELF:
+        body = _fake_book(target)
+        (text_dir / f"{name}.md").write_text(body, encoding="utf-8",
+                                             newline="")
+        (text_dir / f"{name}.json").write_text(
+            json.dumps({"title": title, "author": author,
+                        "length": len(body), "source_kind": "сбруя"},
+                       ensure_ascii=False),
+            encoding="utf-8", newline="")
+
+
+_PORTION_MARK = "Сегодняшний кусок:"
+
+
+def _clip_portion(prompt: str) -> str:
+    """Промпт чтения без тела порции. Двадцать тысяч знаков синтетического
+    текста сделали бы эталон нечитаемым, а дифф — бесполезным.
+
+    Проверку это не ослабляет: границы куска проверяются ЧИСЛАМИ ниже
+    (`from_pos`/`to_pos` и длины), а здесь важно всё, что вокруг куска, —
+    конспекты, хвост прошлой порции, глава, правила.
+    """
+    at = prompt.find(_PORTION_MARK)
+    if at == -1:
+        return prompt
+    end = prompt.find("\nФормат - ТОЛЬКО JSON", at)
+    if end == -1:
+        return prompt
+    body = prompt[at + len(_PORTION_MARK):end].strip()
+    return (prompt[:at + len(_PORTION_MARK)]
+            + f"\n\n[тело порции, {len(body)} знаков — в эталон не едет]\n"
+            + prompt[end:])
+
+
+def _dump_shelf(eng) -> str:
+    rows = eng.all_books()
+    if not rows:
+        return "  (полка пуста)"
+    return "\n".join(
+        f"  {b['title']:<16} | {b['length']:>6} знаков | позиция "
+        f"{b['position']:>6} | порций {b['readings']} | "
+        f"{b['closed_why'] or (b['picked_why'] and 'на руках') or 'лежит'}"
+        for b in rows)
+
+
+def _run_reading() -> str:
+    """Чтение: единственное дело, результат которого лежит вне базы."""
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_READING_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
+
+    saved_dir = config.LIBRARY_DIR
+    with tempfile.TemporaryDirectory(prefix="golden-shelf-") as tmp:
+        root = Path(tmp)
+        _make_shelf(root)
+        config.LIBRARY_DIR = root
+        try:
+            # Сведение полки с каталогом — то же движение, что делает
+            # `agent.sync_shelf` при подъёме. Своей копией `INSERT`-ов сбруя
+            # не обходится: тогда непроверенным остался бы стык, на котором
+            # книга попадает в базу.
+            with eng.unit():
+                synced = eng.sync_books(library.catalog(root))
+
+            steps = []
+
+            def run(at, title):
+                got = cycle.reading_tick(eng, edges, at, tz=TZ)
+                book = eng.current_book()
+                steps.append(
+                    f"{title:<34} | {at.astimezone(TZ):%H:%M} | "
+                    f"вернул = {got!r:<34} | на руках: "
+                    f"{(book['title'] + ', ' + str(book['position'])) if book else '—'}"
+                )
+                return got
+
+            run(READ_NIGHT, "1. ночь, 05:00")
+
+            with eng.unit():
+                eng.touch_exchange(READ_NOON - timedelta(minutes=10))
+            run(READ_NOON, "2. говорили 10 мин назад")
+
+            with eng.unit():
+                eng.touch_exchange(READ_NOON - timedelta(hours=3))
+            run(READ_NOON, "3. тихо три часа")
+            choice_prompt = llm.seen[0][0]["content"]
+
+            run(READ_LATER, "4. +7 ч, книги нет")
+            run(READ_NEXT, "5. +25 ч")
+            run(READ_SOON, "6. +26 ч")
+            run(READ_ONE, "7. +32 ч, первая порция")
+            reading_prompt = llm.seen[2][0]["content"]
+            reading_line = mind._render_reading(eng.snapshot(READ_ONE).reading)
+            run(READ_TWO, "8. +44 ч, вторая порция")
+            run(READ_THREE, "9. +50 ч, третья")
+
+            book_id = [b["id"] for b in eng.all_books()
+                       if b["picked_why"]][0]
+            conspectus = eng.conspectus_so_far(book_id, cycle.CONSPECTUS_LIMIT)
+            notes = eng.untold_notes()
+            deeds = eng.deeds_between(READ_NOON - timedelta(hours=1),
+                                      READ_THREE + timedelta(hours=1))
+            deeds_block = mind._render_deeds(deeds)
+        finally:
+            config.LIBRARY_DIR = saved_dir
+
+    return (
+        f"полка на диске: {len(synced['added'])} книг заведено\n"
+        + "\n".join(f"  {path}" for path in synced["added"])
+        + f"\n{'=' * 60}\n"
+        f"ПРОМПТ ВЫБОРА:\n{choice_prompt}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ ЧТЕНИЯ (первая порция):\n{_clip_portion(reading_prompt)}\n"
+        f"{'=' * 60}\n"
+        f"окно чтения: {cycle.READING_HOUR_FROM}:00-{cycle.READING_HOUR_TO}:00 "
+        f"по месту, тишина {cycle.READING_QUIET_HOURS} ч, за книгу не чаще "
+        f"{cycle.READING_INTERVAL_HOURS} ч, к полке не чаще "
+        f"{cycle.CHOICE_INTERVAL_HOURS} ч\n"
+        + "\n".join(steps)
+        + f"\n{'=' * 60}\n"
+        f"вызовы модели по порядку:\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+        + f"\n{'=' * 60}\n"
+        f"полка после:\n{_dump_shelf(eng)}\n"
+        f"{'=' * 60}\n"
+        f"что он помнит о книге (конспекты по порядку чтения):\n"
+        + "\n".join(f"  {i}. {c}" for i, c in enumerate(conspectus, 1))
+        + f"\n{'=' * 60}\n"
+        f"строка книги в системном промпте (после первой порции):\n"
+        f"{reading_line}\n"
+        f"{'=' * 60}\n"
+        f"заметки на полях (нерассказанные):\n"
+        + ("\n".join(f"  [{n['title']}] {n['text']}" for n in notes)
+           or "  (нет)")
+        + f"\n{_dump_impulses(eng)}\n"
+        f"{'=' * 60}\n"
+        f"что увидит вечерний проход (Шаг 50):\n{deeds_block}"
+    )
+
+
 # --- Сценарий ГОДОВЩИН (Шаг 45) ---------------------------------------------
 # Пятнадцатое семейство. Заходов четыре, и ни один не лишний: пустой день,
 # годовщина из канона, наступление дня рождения ПО МЕСТУ и повтор в тот же
@@ -2845,6 +3126,8 @@ def render(name: str) -> str:
         return _run_anniversary()
     if name == "day":
         return _run_day()
+    if name == "reading":
+        return _run_reading()
     if name == "initiative":
         return _run_initiative()
     if name == "http":

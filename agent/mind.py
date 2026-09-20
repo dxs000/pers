@@ -3144,7 +3144,15 @@ def _build_reading_prompt(turn: Turn, book: dict, portion: dict,
         parts.append(f"Сейчас твоё настроение - {turn.mood}.")
     parts.append("")
 
-    stage = _reading_stage(float(portion.get("progress") or 0.0))
+    # Доля считается по НАЧАЛУ порции, а не по её концу. `portion["progress"]`
+    # отвечает на вопрос «где он окажется, дочитав этот кусок», и для
+    # хранилища это верная величина — позиция после захода. Персонажу же
+    # сообщают, где он открывает книгу СЕЙЧАС, и разница не косметическая: на
+    # порции 20 000..40 000 из 50 000 конец даёт «к концу», а он в этот момент
+    # ещё не добрался до середины. Сказанное в первой строке промпта задаёт
+    # тон всему, что он потом напишет о прочитанном.
+    total = int(portion.get("length") or 0) or 1
+    stage = _reading_stage(int(portion.get("from_pos") or 0) / total)
     parts.append(f"Книга: {author}{book['title']}. Ты {stage}.")
     if portion.get("chapter"):
         parts.append(f"Сейчас идёт: {portion['chapter']}")

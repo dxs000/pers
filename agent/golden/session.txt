@@ -189,6 +189,7 @@ session_stale(+4ч) = True
       "touched_at": "2026-01-12T09:00:00+00:00"
     }
   ],
+  "reading": null,
   "episodes": [
     {
       "id": "ep_1",
