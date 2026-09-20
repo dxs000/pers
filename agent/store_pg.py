@@ -899,6 +899,73 @@ def notes_between(conn, since, until) -> list[dict]:
              "title": r["title"], "author": r["author"]} for r in rows]
 
 
+def deeds_between(conn, since, until) -> dict:
+    """Что он ДЕЛАЛ за окно. Вход вечернего прохода (Шаг 50).
+
+    **Первый вход дня, который не является его же памятью.** До этого шага
+    `day_tick` получал канон, вчерашнюю сцену, нити и погоду — и всё, кроме
+    погоды, было написано им самим. Отсюда болезнь, названная в
+    `0011_reading.sql`: у модели нет источника разнообразия, кроме
+    собственного распределения, и через два месяца вечеров получается человек,
+    который ходит по редакции и откладывает письмо. Промпт дня лечил симптом
+    («Чего в сцене быть НЕ должно: значительности»), потому что лечить причину
+    ему было нечем.
+
+    Здесь появляется причина: прочитанная порция либо есть, либо её нет, и
+    спорить с этим модель не может.
+
+    **Имя выбрано на вырост, а форма — нет.** «Дела» — это то, чем однажды
+    станет общий каркас (намерение → работа → результат), и назвать функцию
+    `readings_between` значило бы переименовывать её на первом же втором деле.
+    Но знает она СЕГОДНЯ только про книги, и никакого общего каркаса не
+    угадывает: правило `0011` («каркас извлекается из двух настоящих дел, а не
+    угадывается до них») остаётся в силе, а второго дела ещё нет.
+
+    Четыре списка, и все четыре — разные события, а не один с пометками:
+    взял книгу, читал, подумал на полях, закрыл. Свести их в один список с
+    колонкой «род» значило бы завести ту самую схему под неизвестное.
+
+    Конспекты НЕ возвращаются намеренно. Вечеру нужно, ЧТО он делал, а не
+    пересказ книги: попади конспект в промпт дня, и сцена съехала бы в
+    изложение прочитанного — день стал бы читательским дневником.
+    """
+    readings = conn.execute(
+        """
+        SELECT b.title, b.author, r.to_pos - r.from_pos AS chars
+          FROM readings r JOIN books b ON b.id = r.book_id
+         WHERE r.at >= %s AND r.at < %s
+         ORDER BY r.at, r.id
+        """,
+        (since, until),
+    ).fetchall()
+    picked = conn.execute(
+        """
+        SELECT title, author, picked_why FROM books
+         WHERE picked_at >= %s AND picked_at < %s ORDER BY picked_at
+        """,
+        (since, until),
+    ).fetchall()
+    closed = conn.execute(
+        """
+        SELECT title, author, closed_why FROM books
+         WHERE closed_at >= %s AND closed_at < %s ORDER BY closed_at
+        """,
+        (since, until),
+    ).fetchall()
+    return {
+        "readings": [{"title": r["title"], "author": r["author"],
+                      "chars": int(r["chars"])} for r in readings],
+        # Заметки берутся готовым читателем, а не четвёртым запросом здесь:
+        # `notes_between` написан, задокументирован и отвечает ровно на этот
+        # вопрос. Вторая копия того же `SELECT` разошлась бы с первой молча.
+        "notes": notes_between(conn, since, until),
+        "picked": [{"title": r["title"], "author": r["author"],
+                    "why": r["picked_why"]} for r in picked],
+        "closed": [{"title": r["title"], "author": r["author"],
+                    "why": r["closed_why"]} for r in closed],
+    }
+
+
 def close_book(conn, book_id: int, now, why: str):
     """Закрыть книгу: дочитал или бросил. Строка остаётся (`0011_reading.sql`)."""
     return conn.execute(

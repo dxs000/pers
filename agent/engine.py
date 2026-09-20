@@ -121,6 +121,9 @@ class PgEngine:
     def notes_between(self, since, until) -> list[dict]:
         return self._pg.notes_between(self.conn, since, until)
 
+    def deeds_between(self, since, until) -> dict:
+        return self._pg.deeds_between(self.conn, since, until)
+
     def close_book(self, book_id: int, now: datetime, why: str):
         return self._pg.close_book(self.conn, book_id, now, why)
 

@@ -542,10 +542,22 @@ def day_tick(eng, edges: Edges, now: datetime, *, tz=None) -> list[str] | None:
 
     threads = eng.open_threads("self")
     canon = eng.all_memories()
+
+    # Сделанное за окно (Шаг 50). Окно — от прошлой метки до сейчас, а не
+    # «сутки назад»: пропусти проход вечер (гости, сеть лежала, демон не
+    # работал), и прочитанное в тот вечер не должно пропасть из жизни только
+    # потому, что подвести день не успели. Без метки — сутки, потому что
+    # первому вечеру не от чего отсчитывать.
+    #
+    # Спрашивается ПОСЛЕ заслонок, вместе с каноном, и по той же причине: до
+    # этого места доходит один заход из многих сотен.
+    since = settled or (now - timedelta(days=1))
+    deeds = eng.deeds_between(since, now)
+
     got = day(turn, canon, born, age_now, edges.llm,
               now=local, weather=weather,
               yesterday=previous["text"] if previous else None,
-              threads=threads)
+              threads=threads, deeds=deeds)
     scenes = got["scenes"]
 
     # Ворота сверки - те же, что у биографа и у вспомненного во сне. Прожитое
@@ -581,7 +593,16 @@ def day_tick(eng, edges: Edges, now: datetime, *, tz=None) -> list[str] | None:
         # неудача - не повод повторять её через пять секунд на тех же входах.
         eng.set_day_at(now)
     if not written:
-        logging.info("день: записывать нечего")
+        # Пустой день при ПУСТОМ окне — обычное дело. Пустой день при
+        # сделанном — другое: он что-то делал, и в биографии этого не будет.
+        # Не ошибка (сверка могла отвергнуть сцену, модель могла промолчать),
+        # но и не рядовой исход, и видеть его надо отдельно от первого.
+        if any(deeds.values()):
+            logging.warning(
+                "день: записывать нечего, хотя сделанное было — %s",
+                ", ".join(f"{k}: {len(v)}" for k, v in deeds.items() if v))
+        else:
+            logging.info("день: записывать нечего")
 
     for scene in written:
         logging.info("прожито: %s", scene[:80])
