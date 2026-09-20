@@ -88,6 +88,10 @@ body {
   margin-top: 0.35rem;
 }
 
+.shelf-essay {
+  margin-top: 0.25rem;
+}
+
 .stage {
   flex: 1;
   min-height: 0;
