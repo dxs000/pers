@@ -160,3 +160,53 @@ export async function listenReplies(onReply) {
   await client.query(`LISTEN ${CHANNEL_REPLY}`);
   return client;
 }
+
+// Вкладка «жизнь» (Шаг 57): то, что персонаж делает и чем становится, пока
+// никто не смотрит. Только чтение. Каждый срез обёрнут отдельно: база, на
+// которую ещё не накатили 0015/0016, отдаёт то, что есть, а не падает целиком.
+async function safeRows(sql, params = []) {
+  try {
+    return (await pool.query(sql, params)).rows;
+  } catch (err) {
+    console.error("readLife:", err.message);
+    return [];
+  }
+}
+
+export async function readLife() {
+  const [agent] = await safeRows(
+    `SELECT name, born_at, birthplace, place_label, traits, mood, mood_reason, mood_since
+       FROM agent WHERE id = 1`
+  );
+  const drives = await safeRows(
+    `SELECT d.id, d.kind, d.text, d.basis, d.opened_at, d.closed_at, d.closed_why,
+            round(drive_score(d.strength, d.touched_at, now())::numeric, 2)::float AS score,
+            coalesce(array_agg(s.memory_id ORDER BY s.memory_id)
+                     FILTER (WHERE s.memory_id IS NOT NULL), '{}') AS sources
+       FROM drives d LEFT JOIN drive_sources s ON s.drive_id = d.id
+      GROUP BY d.id
+      ORDER BY (d.closed_at IS NULL) DESC, coalesce(d.closed_at, d.opened_at) DESC
+      LIMIT 20`
+  );
+  const traits = await safeRows(
+    `SELECT name, reason, set_at, dropped_at FROM trait_history
+      ORDER BY coalesce(dropped_at, set_at) DESC, id DESC LIMIT 30`
+  );
+  const pursuits = await safeRows(
+    `SELECT id, at, action, why, about, outcome FROM pursuits
+      ORDER BY at DESC, id DESC LIMIT 30`
+  );
+  const memories = await safeRows(
+    `SELECT id, happened_at, precision, text, source, created_at FROM memories
+      ORDER BY created_at DESC, id DESC LIMIT 20`
+  );
+  const total = await safeRows("SELECT count(*)::int AS n FROM memories");
+  return {
+    agent: agent ?? null,
+    drives,
+    traits,
+    pursuits,
+    memories,
+    memoriesTotal: total[0]?.n ?? 0,
+  };
+}

@@ -77,8 +77,10 @@ pg-прогоне брался из файла, единственное мес�
 """
 
 import argparse
+import base64
 import difflib
 import json
+import os
 import tempfile
 from dataclasses import asdict, dataclass
 import sys
@@ -98,7 +100,10 @@ from openai import OpenAIError
 # Модулем целиком, а не именами: сценарий биографии зовёт `mind` как зовёт
 # его `cycle` — проходом за проходом, — и `mind.VERDICT_WRITE` рядом с
 # `mind.check_memory` читается как один слой, а не как россыпь имён.
+import agenda as agenda_mod
 import mind
+import drives as drives_mod
+import news as news_mod
 import sky
 # Модулем, и только ради двух констант вспоминания (Шаг 40): прибавка и
 # потолок живут в хранилище, потому что применяются внутри SQL, а эталон
@@ -471,7 +476,7 @@ class _FakeNet:
         return self._reply(_FORECAST_PAYLOAD)
 
     def post(self, url, json=None, headers=None, **kwargs):
-        return self._reply(_TAVILY_PAYLOAD)
+        return self._reply(_SEARCH_PAYLOAD)
 
     @staticmethod
     def _reply(payload):
@@ -492,12 +497,37 @@ _FORECAST_PAYLOAD = {
     }
 }
 
-_TAVILY_PAYLOAD = {
-    "results": [
-        {"title": f["title"], "url": f["url"], "content": f["snippet"]}
-        for f in _FINDINGS
-    ]
+# Слепок ответа Yandex Search API v2: XML в Base64 в поле `rawData`.
+#
+# До этой правки здесь лежал слепок Tavily, и он пережил переезд поиска на
+# Яндекс (коммит «web.search — Yandex Search API v2»). Настоящий `web.search`
+# не нашёл в нём `rawData`, вернул `None`, и сценарии `turn` и `inbox` молча
+# перестали искать. Сбруя покраснела — но покраснела так, что расхождение
+# читалось как «ретривер передумал», а не как «парсер выдачи больше не
+# покрыт». Слепок обязан говорить на языке того края, который проверяет.
+def _yandex_xml(findings) -> str:
+    from xml.sax.saxutils import escape
+    docs = "".join(
+        "<group><doc>"
+        f"<url>{escape(f['url'])}</url>"
+        f"<title>{escape(f['title'])}</title>"
+        f"<passages><passage>{escape(f['snippet'])}</passage></passages>"
+        "</doc></group>"
+        for f in findings
+    )
+    return ('<?xml version="1.0" encoding="utf-8"?>'
+            f"<yandexsearch><response><results><grouping>{docs}"
+            "</grouping></results></response></yandexsearch>")
+
+
+_SEARCH_PAYLOAD = {
+    "rawData": base64.b64encode(_yandex_xml(_FINDINGS).encode("utf-8")).decode("ascii"),
 }
+
+# Папка облака читается `web.search` из окружения В МОМЕНТ ВЫЗОВА. Прибита
+# здесь, а не взята из `.env`, по тому же правилу, что пояс `TZ`: эталон не
+# должен зависеть от того, настроен ли поиск на машине, где его гоняют.
+os.environ["YANDEX_FOLDER_ID"] = "папка-заглушка"
 
 # **Ходов в сценарии ДВА, и это не щедрость.** Одним ходом не проверяется
 # ровно то, ради чего шаг делался: состояние МЕЖДУ ходами. У одного хода
@@ -733,6 +763,9 @@ _DREAM = {"dream": None}
 # срабатывает; этот — откуда повод берётся, и берётся он из места, куда
 # инициатива не заглядывает вовсе: из закрывающейся сессии.
 _CURIOSITY = {"curiosity": None}
+_NEWS = {"news": None}
+_DRIVES = {"drives": None}
+_AGENDA = {"agenda": None}
 
 # Двенадцатое семейство: черты (Шаг 42). Отдельно от сценариев записи
 # (`writes`), хотя тоже про запись: те сверяют СНИМОК после слияния, а здесь
@@ -803,7 +836,7 @@ _PROMISES = {"promises": None}
 _READING = {"reading": None}
 
 SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
-             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
+             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_NEWS, **_DRIVES, **_AGENDA, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
              **_READING, **_BIRTH, **_INSPECT, **_HTTP, **_GENESIS}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
@@ -1767,6 +1800,91 @@ def _run_curiosity() -> str:
     )
 
 
+# --- Сценарий НОВОСТЕЙ (Шаг 55) ---------------------------------------------
+# Заходов шесть, и каждый держит свою заслонку или свой исход:
+#
+#   1. ночь по его месту            -> молчит, модель не зовётся;
+#   2. только что говорили          -> молчит по тишине;
+#   3. день, тихо                   -> модель спрошена, «не сегодня», метка;
+#   4. через час после пустого      -> молчит по метке (без неё «не сегодня»
+#                                      звало бы модель каждую минуту);
+#   5. через три часа               -> свой запрос, лента, задело -> ПОВОД;
+#   6. ещё через три                -> другой запрос, мимо; в его промпте уже
+#                                      виден повод захода 5.
+#
+# Главное, что сценарий держит: ни один заход НЕ пишет в `messages`. До Шага 55
+# отозвавшаяся новость уходила в чат мимо паузы и бюджета суток.
+NEWS_NIGHT = NOW - timedelta(hours=11)          # 02:00 по месту
+NEWS_FIRST = NOW + timedelta(hours=2)           # 15:00 по месту
+NEWS_SECOND = NEWS_FIRST + timedelta(hours=3)   # 18:00
+NEWS_THIRD = NEWS_SECOND + timedelta(hours=3)   # 21:00
+
+_NEWS_SCRIPT = [
+    ("запрос", "не сегодня"),
+    ("запрос", "Тбилиси Абанотубани"),
+    ("задело", '{"stirred": true, "about": "бани у набережной, куда собирались с ним сходить", "why": "уже договорились туда идти"}'),
+    ("запрос", "Кутаиси новости"),
+    ("задело", '{"stirred": false, "about": null, "why": "про это уже думал"}'),
+]
+
+
+def _run_news() -> str:
+    """Новости: он сам выбирает ленту, а в чат говорит только через импульс."""
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_NEWS_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
+    said_before = eng.utterances_since(NOW - timedelta(days=365))
+
+    runs = [
+        ("заход 1 (02:00, ночь)", NEWS_NIGHT),
+        ("заход 2 (13:00, 12 мин после разговора)", NOW),
+        ("заход 3 (15:00, тихо)", NEWS_FIRST),
+        ("заход 4 (16:00, через час после пустого)", NEWS_FIRST + timedelta(hours=1)),
+        ("заход 5 (18:00)", NEWS_SECOND),
+        ("заход 6 (21:00)", NEWS_THIRD),
+    ]
+    lines = []
+    for label, at in runs:
+        got = news_mod.news_tick(eng, edges, at, tz=TZ)
+        lines.append(f"{label}: {got!r}")
+    said_after = eng.utterances_since(NOW - timedelta(days=365))
+
+    # Промпты берутся по СОДЕРЖИМОМУ вызова: 0 — первый запрос, 3 — третий
+    # (в нём уже виден повод), 2 — первая оценка ленты.
+    first_query = llm.seen[0][0]["content"]
+    stir = llm.seen[2][0]["content"]
+    third_query = llm.seen[3][0]["content"]
+    picked = eng.strongest_impulse(NEWS_THIRD, cycle.IMPULSE_FLOOR)
+
+    return (
+        f"ПРОМПТ ЗАПРОСА (первый заход с моделью):\n{first_query}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ ЛЕНТЫ:\n{stir}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ ЗАПРОСА (после повода):\n{third_query}\n"
+        f"{'=' * 60}\n"
+        + "\n".join(lines)
+        + f"\n  (окно {news_mod.NEWS_HOUR_FROM}-{news_mod.NEWS_HOUR_TO} по месту, "
+        f"тишина {news_mod.NEWS_QUIET_HOURS} ч, не чаще {news_mod.NEWS_INTERVAL_HOURS} ч)\n"
+        f"{'=' * 60}\n"
+        f"вызовы модели по порядку:\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+        + f"\n{'=' * 60}\n"
+        f"сказал сам: было {said_before}, стало {said_after} "
+        f"(новости в чат не пишут)\n"
+        f"{_dump_impulses(eng)}\n"
+        f"{'=' * 60}\n"
+        f"самый сильный повод: {picked['kind'] if picked else '—'} "
+        f"(сила {news_mod.NEWS_URGE} при пороге {cycle.IMPULSE_FLOOR}, "
+        f"срок {news_mod.NEWS_TTL_HOURS} ч)\n"
+        f"{'=' * 60}\n"
+        f"РЕМАРКА ИНИЦИАТИВЫ на этом поводе:\n"
+        f"{mind.render_initiative(dict(picked) if picked else None)}"
+    )
+
+
 # --- Сценарий ДНЯ (Шаг 46) --------------------------------------------------
 # Шестнадцатое семейство. Заходов шесть, и это больше, чем у любого другого
 # прохода, — потому что у дня больше состояний, чем у остальных:
@@ -2576,8 +2694,232 @@ def _run_traits() -> str:
         f"заход 2 (канон не вырос): {again}\n"
         f"новых с пересчёта: {eng.memories_since(eng.traits_at())}\n"
         f"{'=' * 60}\n"
+        f"история черт (Шаг 56 — основания больше не выбрасываются):\n"
+        f"{_dump_trait_history(eng)}\n"
+        f"{'=' * 60}\n"
         "первая строка системного промпта:\n"
         + build_system_prompt(after, TRAITS_NOW.astimezone(TZ)).split("\n\n")[0]
+    )
+
+
+def _dump_trait_history(eng) -> str:
+    rows = eng.trait_history()
+    if not rows:
+        return "  (пусто)"
+    return "\n".join(
+        f"  {r['name']:<14} | с {r['set_at']} | "
+        f"{'до ' + r['dropped_at'] if r['dropped_at'] else 'держится':<30} | {r['reason']}"
+        for r in rows)
+
+
+# --- Сценарий ПОБУЖДЕНИЙ (Шаг 56) -------------------------------------------
+# Заходов четыре:
+#
+#   1. биография есть, прохода не было -> модель; из четырёх кандидатов
+#      записано два. Отвергнуты: вера, опирающаяся только на сон, и желание
+#      без номера строки. Это две главные заслонки писателя, и видны они
+#      только рядом с принятыми;
+#   2. через час                      -> молчит по интервалу;
+#   3. через сутки, биография не росла -> молчит по шагу;
+#   4. прожито три дня                -> в промпте видны записанные с
+#      номерами; одно подтверждено, одно закрыто, ссылка на несуществующий
+#      номер проглочена молча.
+DRIVES_NOW = NOW + timedelta(hours=2)
+DRIVES_LATER = DRIVES_NOW + timedelta(hours=26)
+
+_DRIVES_SCRIPT = [
+    ("побуждения", json.dumps({
+        "opened": [
+            {"kind": "боится", "text": "что от Кутаиси не останется ничего, куда можно вернуться",
+             "why": "уехал сам, а теперь двор снится чужим", "from": [3, 4]},
+            {"kind": "верит", "text": "что сад во дворе ещё можно вернуть",
+             "why": "так сказали во сне", "from": [4]},
+            {"kind": "хочет", "text": "сделать хоть что-то своё, а не по заказу",
+             "why": "о первой работе молчит не просто так", "from": []},
+            {"kind": "хочет", "text": "сделать хоть что-то своё, а не по заказу",
+             "why": "о первой работе молчит не просто так", "from": [5]},
+        ],
+        "stronger": [], "closed": [],
+    }, ensure_ascii=False)),
+    ("побуждения", json.dumps({
+        "opened": [],
+        "stronger": [2, 7],
+        "closed": [{"n": 1, "why": "съездил, двор на месте"}],
+    }, ensure_ascii=False)),
+]
+
+
+def _dump_drives(eng) -> str:
+    rows = eng.all_drives()
+    if not rows:
+        return "  (пусто)"
+    return "\n".join(
+        f"  {r['id']:<3}| {drives_mod.KIND_WORDS[r['kind']]:<13} | сила {r['strength']:.1f} | "
+        f"из #{', #'.join(map(str, r['sources']))} | "
+        f"{('закрыто: ' + r['closed_why']) if r['closed_at'] else 'открыто'} | {r['text']}"
+        for r in rows)
+
+
+def _run_drives() -> str:
+    """Побуждения вырастают из биографии, и у каждого видно, из какой строки."""
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_DRIVES_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
+
+    first = drives_mod.drives_tick(eng, edges, DRIVES_NOW)
+    after_first = _dump_drives(eng)
+    system = build_system_prompt(eng.snapshot(DRIVES_NOW), DRIVES_NOW.astimezone(TZ))
+    second = drives_mod.drives_tick(eng, edges, DRIVES_NOW + timedelta(hours=1))
+    third = drives_mod.drives_tick(eng, edges, DRIVES_NOW + timedelta(hours=24))
+
+    with eng.unit():
+        for i, text in enumerate([
+            "Взял заказ на перевод, хотя обещал себе больше не брать.",
+            "Вечером сел за своё и написал абзац, который не стыдно оставить.",
+            "Позвонил двоюродный брат из Кутаиси: двор цел, сад вырубили давно.",
+        ]):
+            eng.add_memory(DRIVES_NOW + timedelta(hours=3 + i), "day", text,
+                           "lived", now=DRIVES_NOW + timedelta(hours=3 + i))
+    fourth = drives_mod.drives_tick(eng, edges, DRIVES_LATER)
+
+    return (
+        f"ПРОМПТ ПОБУЖДЕНИЙ (первый проход):\n{llm.seen[0][0]['content']}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ ПОБУЖДЕНИЙ (после трёх прожитых дней) — блок записанного:\n"
+        + "Что уже записано о том"
+        + llm.seen[1][0]["content"].split("Что уже записано о том")[1].split("\n\nПобуждение - ")[0]
+        + f"\n{'=' * 60}\n"
+        f"заход 1: {first}\n"
+        f"заход 2 (+1 ч): {second}\n"
+        f"заход 3 (+24 ч, биография не росла): {third}\n"
+        f"заход 4 (+26 ч, прожито три дня): {fourth}\n"
+        f"  (шаг {drives_mod.DRIVES_STEP}, пол {drives_mod.DRIVES_FLOOR}, "
+        f"не чаще {drives_mod.DRIVES_INTERVAL_HOURS} ч)\n"
+        f"{'=' * 60}\n"
+        f"вызовы модели по порядку:\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+        + f"\n{'=' * 60}\n"
+        f"после первого прохода:\n{after_first}\n"
+        f"после четвёртого:\n{_dump_drives(eng)}\n"
+        f"{'=' * 60}\n"
+        f"СИСТЕМНЫЙ ПРОМПТ после первого прохода (до места):\n"
+        + system.split("\n\nТы в ")[0]
+    )
+
+
+# --- Сценарий ВОЛИ (Шаг 57) ------------------------------------------------
+# Один день и одно утро. Заходов семь:
+#
+#   1. 02:00, ночь                 -> молчит: ночью работает сон;
+#   2. 13:00, 12 мин после разговора -> молчит по тишине;
+#   3. 15:00 покопаться            -> поиск, вывод, ПОВОД `pursuit`;
+#   4. 16:00                       -> молчит по интервалу;
+#   5. 17:00 вспоминать            -> сверка, новая строка биографии `inferred`;
+#   6. 19:00 задуматься            -> мысль в журнале, в биографию НЕ пишется;
+#   7. 21:00 «писать своё»         -> писать не о чем, пункта нет в меню:
+#                                     решение становится «ничего»;
+#   8. утро, 08:00 написать ему    -> ПОВОД `reach`; в промпте виден вчерашний
+#                                     день отдельно от сегодняшнего.
+#
+# Артефакты сверх журнала: что дела оставили в вечернем итоге и что из них
+# увидит проход побуждений.
+AGENDA_NIGHT = NOW - timedelta(hours=11)          # 02:00 по месту
+AGENDA_1 = NOW + timedelta(hours=2)               # 15:00
+AGENDA_2 = AGENDA_1 + timedelta(hours=2)          # 17:00
+AGENDA_3 = AGENDA_2 + timedelta(hours=2)          # 19:00
+AGENDA_4 = AGENDA_3 + timedelta(hours=2)          # 21:00
+AGENDA_MORNING = NOW + timedelta(hours=19)        # 08:00 следующего дня
+
+_AGENDA_SCRIPT = [
+    ("решение", '{"do": "покопаться", "about": "Кутаиси старые дворы снос", "why": "с утра крутится, что там осталось от двора", "drive": 1}'),
+    ("вывод", '{"took": "Про Кутаиси ничего, одни тбилисские бани. Видимо, такое в сети не ищется.", "tell": true}'),
+    ("решение", '{"do": "вспоминать", "about": "двор в Кутаиси, до отъезда", "why": "раз не нашёл, попробую сам", "drive": 1}'),
+    ("вспоминание", '{"recalled": {"age": 9, "precision": "era", "text": "Под окном у нас росла алыча, и соседка ругалась, когда мы трясли её зелёной."}}'),
+    ("сверка", "записать"),
+    ("решение", '{"do": "задуматься", "about": "если бы тогда не уехал", "why": "вечер, и тянет", "drive": null}'),
+    ("мысль", '{"thought": "Работал бы в местной газете и ругался с тем же редактором, что и отец. Алычу бы, наверное, уже спилили, а я бы этого не заметил.", "tell": false}'),
+    ("решение", '{"do": "писать своё", "about": null, "why": "хочется записать про двор", "drive": null}'),
+    ("решение", '{"do": "написать ему", "about": "про алычу во дворе", "why": "вчерашнее не отпускает", "drive": 1}'),
+]
+
+
+def _dump_pursuits(eng) -> str:
+    rows = eng.all_pursuits()
+    if not rows:
+        return "  (пусто)"
+    return "\n".join(
+        f"  {r['at']} | {r['action']:<8} | побуждение {r['drive_id'] or '—'} | "
+        f"{r['about'] or '—'} | {r['why']} -> {r['outcome'] or '—'}"
+        for r in rows)
+
+
+def _run_agenda() -> str:
+    """Он сам выбирает, чем занять время, и каждое решение оставляет след."""
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_AGENDA_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
+    with eng.unit():
+        eng.add_drive("question", "что осталось от кутаисского двора",
+                      "уехал, не оглянувшись, а двор снится", [3, 4], NOW)
+    canon_before = len(eng.all_memories())
+
+    runs = [
+        ("заход 1 (02:00, ночь)", AGENDA_NIGHT),
+        ("заход 2 (13:00, 12 мин после разговора)", NOW),
+        ("заход 3 (15:00)", AGENDA_1),
+        ("заход 4 (16:00)", AGENDA_1 + timedelta(hours=1)),
+        ("заход 5 (17:00)", AGENDA_2),
+        ("заход 6 (19:00)", AGENDA_3),
+        ("заход 7 (21:00)", AGENDA_4),
+        ("заход 8 (утро, 08:00)", AGENDA_MORNING),
+    ]
+    lines = [f"{label}: {agenda_mod.agenda_tick(eng, edges, at, tz=TZ)!r}"
+             for label, at in runs]
+
+    day_from = AGENDA_1.astimezone(TZ).replace(hour=0, minute=0)
+    deeds = mind._render_deeds(eng.deeds_between(day_from, AGENDA_4 + timedelta(hours=1)))
+    drives_prompt = drives_mod.build_prompt(
+        eng.snapshot(AGENDA_MORNING), eng.all_memories(),
+        timeutil.parse_ts(eng.snapshot(NOW).born_at), 32,
+        eng.open_drives(AGENDA_MORNING), {},
+        [p for p in eng.recent_pursuits(AGENDA_MORNING + timedelta(hours=1), 24)
+         if p["action"] != "rest"])
+    morning = llm.seen[8][0]["content"]
+
+    return (
+        f"ПРОМПТ РЕШЕНИЯ (15:00):\n{llm.seen[0][0]['content']}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ ВЫВОДА:\n{llm.seen[1][0]['content']}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ ВСПОМИНАНИЯ:\n{llm.seen[3][0]['content']}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ МЫСЛИ:\n{llm.seen[6][0]['content']}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ РЕШЕНИЯ (утро) — от сделанного до меню:\n"
+        + "Сегодня" + morning.split("\nСегодня", 1)[1].split("Что можно сейчас")[0]
+        + f"{'=' * 60}\n"
+        + "\n".join(lines)
+        + f"\n  (окно {agenda_mod.AGENDA_HOUR_FROM}-{agenda_mod.AGENDA_HOUR_TO} по месту, "
+        f"тишина {agenda_mod.AGENDA_QUIET_HOURS} ч, не чаще {agenda_mod.AGENDA_INTERVAL_HOURS} ч)\n"
+        f"{'=' * 60}\n"
+        f"вызовы модели по порядку:\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+        + f"\n{'=' * 60}\n"
+        f"журнал дел:\n{_dump_pursuits(eng)}\n"
+        f"{'=' * 60}\n"
+        f"биография: было {canon_before}, стало {len(eng.all_memories())}\n"
+        f"{_dump_memories(eng)}\n"
+        f"{'=' * 60}\n"
+        f"{_dump_impulses(eng)}\n"
+        f"{'=' * 60}\n"
+        f"ВЕЧЕРНИЙ ИТОГ увидит:\n{deeds}\n"
+        f"{'=' * 60}\n"
+        f"ПРОХОД ПОБУЖДЕНИЙ увидит:\n"
+        + "Что он делал по своей воле" + drives_prompt.split("Что он делал по своей воле")[1].split("\n\n")[0]
     )
 
 
@@ -3116,6 +3458,12 @@ def render(name: str) -> str:
         return _run_dream()
     if name == "curiosity":
         return _run_curiosity()
+    if name == "news":
+        return _run_news()
+    if name == "drives":
+        return _run_drives()
+    if name == "agenda":
+        return _run_agenda()
     if name == "traits":
         return _run_traits()
     if name == "promises":

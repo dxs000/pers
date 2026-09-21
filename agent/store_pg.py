@@ -185,6 +185,17 @@ def _assertions_by_object(conn, object_ids: list[int]) -> dict[int, list[dict]]:
     return out
 
 
+# Сколько побуждений видит разговор. Меньше, чем нитей: нить — дело, и их у
+# человека много; побуждений, которые правда определяют день, два-три.
+DRIVES_SNAPSHOT_LIMIT = 3
+
+
+def _snapshot_drives(conn, now) -> list[dict]:
+    import store_character
+    return [{"kind": d["kind"], "text": d["text"]}
+            for d in store_character.open_drives(conn, now, DRIVES_SNAPSHOT_LIMIT)]
+
+
 def build_snapshot(conn, now, limit: int = 7) -> Turn:
     """Снимок хода из базы. Та же форма, что у `store.build_snapshot`.
 
@@ -279,6 +290,7 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
         outside_latch=agent.get("outside_latch"),
         threads=open_threads(conn, "self", THREADS_SNAPSHOT_LIMIT),
         reading=current_reading(conn),
+        drives=_snapshot_drives(conn, now),
         episodes=[
             {
                 "id": f"ep_{e['id']}",
@@ -963,7 +975,18 @@ def deeds_between(conn, since, until) -> dict:
                     "why": r["picked_why"]} for r in picked],
         "closed": [{"title": r["title"], "author": r["author"],
                     "why": r["closed_why"]} for r in closed],
+        # Второе дело (Шаг 57), и каркас «намерение -> работа -> результат»
+        # теперь извлекается из настоящего: журнал `pursuits` так и устроен.
+        # Сюда едут только дела, у которых нет своей таблицы: чтение уже
+        # видно выше, эссе живёт файлом, новости — поводом.
+        "pursuits": [p for p in _pursuits_between(conn, since, until)
+                     if p["action"] in ("explore", "recall", "daydream")],
     }
+
+
+def _pursuits_between(conn, since, until) -> list[dict]:
+    import store_agenda
+    return store_agenda.pursuits_between(conn, since, until)
 
 
 def close_book(conn, book_id: int, now, why: str):
@@ -1081,10 +1104,22 @@ def _fill_fixture(conn, state: dict) -> None:
     # и соседний видит её остатки. Полка тут особенно опасна: книга,
     # оставшаяся открытой от прошлого сценария, делает читающий проход
     # зависимым от порядка прогона.
-    conn.execute("TRUNCATE objects, assertions, episodes, aliases, sessions, "
-                 "messages, impulses, memories, promises, threads, "
-                 "books, readings, notes "
-                 "RESTART IDENTITY CASCADE")
+    #
+    # С Шага 56 перечень НЕ поимённый. Поимённый подвёл в четвёртый раз:
+    # `essays` и `essay_passages` (Шаг 53) в него не попали вовсе, а
+    # `trait_history`, заведённая Шагом 56, унесла основания черт из сценария
+    # `traits` в сценарий `drives`. Список теперь берётся из каталога: все
+    # таблицы схемы, кроме строки `agent` (она одна и обязана жить) и журнала
+    # миграций (он описывает базу, а не персонажа). Новая таблица попадает
+    # сюда сама, и забыть её больше нельзя.
+    tables = [r["tablename"] for r in conn.execute(
+        """SELECT tablename FROM pg_tables
+            WHERE schemaname = current_schema()
+              AND tablename NOT IN ('agent', 'schema_migrations')
+            ORDER BY tablename"""
+    ).fetchall()]
+    conn.execute("TRUNCATE " + ", ".join(f'"{t}"' for t in tables)
+                 + " RESTART IDENTITY CASCADE")
 
     conn.execute(
         """
@@ -1115,7 +1150,8 @@ def _fill_fixture(conn, state: dict) -> None:
         UPDATE agent SET name=%s, born_at=%s, birthplace=%s, traits=%s, mood=%s,
                place_label=%s, place_lat=%s, place_lon=%s, outside_latch=%s,
                last_exchange_ts=%s, last_search_ts=NULL, traits_at=%s,
-               mood_reason=%s, mood_since=%s, day_at=NULL, read_at=NULL
+               mood_reason=%s, mood_since=%s, day_at=NULL, read_at=NULL,
+               essay_at=NULL, news_at=NULL, drives_at=NULL, agenda_at=NULL
          WHERE id = 1
         """,
         (

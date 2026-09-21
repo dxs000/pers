@@ -11,10 +11,14 @@ import genesis
 import library
 import outside
 import sky as sky_mod
+# Выбор книги живёт в `shelf_choice` (Шаг 49.1). До Шага 56 он подменялся
+# здесь из `agent.py` присваиванием `cycle.choose_book = ...`, и сбруя, которая
+# `agent.py` не импортирует, проверяла копию из `mind`, а демон жил другой.
+from shelf_choice import choose_book
 import timeutil
 import web
 from mind import (CONSPECTUS_LIMIT, VERDICT_WRITE, build_system_prompt,
-                  check_memory, choose_book, decide_query, dream,
+                  check_memory, decide_query, dream,
                   dream_subject, extract_memories, extract_objects, linger,
                   notice_promise, propose_birthplaces, propose_names,
                   read_portion, reflect_mood, reflect_self, reflect_traits,
@@ -1328,6 +1332,12 @@ def reconsider_traits(eng, edges: Edges, now: datetime) -> list[str] | None:
         # дали, и решение «не трогать список» принимается здесь, повтором
         # прежнего значения. Метка при этом уезжает новая — в том и смысл.
         eng.set_traits(traits or list(turn.traits), now)
+        # История (Шаг 56) пишется той же единицей, что и список: черта,
+        # попавшая в `agent.traits` без строки в истории, — ровно тот разъезд,
+        # от которого `set_traits` держит список и метку одним `UPDATE`.
+        # Пустой пересчёт историю не трогает, как не трогает и список.
+        if traits:
+            eng.record_traits(found, now)
     if not traits:
         return None
 

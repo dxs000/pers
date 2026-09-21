@@ -17,9 +17,9 @@ import store_pg
 import timeutil
 import essay as essay_mod
 import news as news_mod
+import drives as drives_mod
+import agenda as agenda_mod
 from mind import summarize_session
-import shelf_choice
-cycle.choose_book = shelf_choice.choose_book
 
 POLL_SECONDS = 5.0
 BACKGROUND_SECONDS = 60.0
@@ -186,28 +186,23 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
     except Exception as err:
         logging.warning("сон не приснился: %s", err)
     try:
-        if cycle.reading_tick(eng, edges, now) is not None:
-            return
-    except Exception as err:
-        logging.warning("чтение не состоялось: %s", err)
-    try:
-        if essay_mod.essay_tick(eng, edges, now) is not None:
-            return
-    except Exception as err:
-        logging.warning("эссе не состоялось: %s", err)
-    try:
-        if news_mod.news_tick(
-                eng, edges, now,
-                announce=lambda _text: store_pg.notify(
-                    eng.conn, store_pg.CHANNEL_REPLY)) is not None:
-            return
-    except Exception as err:
-        logging.warning("новости не состоялись: %s", err)
-    try:
         if cycle.reconsider_traits(eng, edges, now) is not None:
             return
     except Exception as err:
         logging.warning("черты не пересмотрены: %s", err)
+    try:
+        if drives_mod.drives_tick(eng, edges, now) is not None:
+            return
+    except Exception as err:
+        logging.warning("побуждения не пересмотрены: %s", err)
+    # Чтение, эссе и новости больше не ходят по своим расписаниям (Шаг 57):
+    # их зовёт проход «чем заняться», когда он сам так решил. Выше остаются
+    # дела, которые не выбирают: обещания, итог дня, сон, пересмотр себя.
+    try:
+        if agenda_mod.agenda_tick(eng, edges, now) is not None:
+            return
+    except Exception as err:
+        logging.warning("решение, чем заняться, не состоялось: %s", err)
     try:
         cycle.background_tick(
             eng, edges, datetime.now(timezone.utc),
@@ -257,16 +252,52 @@ def cmd_news() -> int:
     edges = cycle.open_edges()
     eng = engine_mod.open_engine()
     try:
-        got = news_mod.news_tick(
-            eng, edges, datetime.now(timezone.utc), force=True,
-            announce=lambda _text: store_pg.notify(
-                eng.conn, store_pg.CHANNEL_REPLY),
-        )
+        got = news_mod.news_tick(eng, edges, datetime.now(timezone.utc),
+                                 force=True)
     finally:
         eng.close()
         edges.close()
     if got is None:
-        print("заход состоялся, в новости не пошёл — причина строкой выше")
+        print("заход не состоялся — причина строкой выше")
+        return 1
+    print(got)
+    return 0
+
+
+def cmd_drives() -> int:
+    """Один проход побуждений сейчас, мимо заслонок времени (Шаг 56)."""
+    edges = cycle.open_edges()
+    eng = engine_mod.open_engine()
+    try:
+        got = drives_mod.drives_tick(eng, edges, datetime.now(timezone.utc),
+                                     force=True)
+        drives = eng.open_drives(datetime.now(timezone.utc))
+    finally:
+        eng.close()
+        edges.close()
+    if got is None:
+        print("проход не состоялся — причина строкой выше")
+        return 1
+    print("\n".join(got) or "без перемен")
+    print("\nсейчас открыто:")
+    for d in drives:
+        print(f"  [{d['score']:.2f}] {drives_mod.KIND_WORDS[d['kind']]}: {d['text']}"
+              f"  <- #{', #'.join(map(str, d['sources']))}")
+    return 0
+
+
+def cmd_agenda() -> int:
+    """Одно решение «чем заняться» сейчас, мимо заслонок времени (Шаг 57)."""
+    edges = cycle.open_edges()
+    eng = engine_mod.open_engine()
+    try:
+        got = agenda_mod.agenda_tick(eng, edges, datetime.now(timezone.utc),
+                                     force=True)
+    finally:
+        eng.close()
+        edges.close()
+    if got is None:
+        print("решения не было — причина строкой выше")
         return 1
     print(got)
     return 0
@@ -349,6 +380,10 @@ def main() -> int:
     parser.add_argument("--text", default="привет", help="первые слова, сказанные персонажу")
     parser.add_argument("--read", action="store_true", help="один заход чтения сейчас")
     parser.add_argument("--news", action="store_true", help="один заход к новостям сейчас")
+    parser.add_argument("--drives", action="store_true",
+                        help="один проход побуждений сейчас и что открыто")
+    parser.add_argument("--agenda", action="store_true",
+                        help="одно решение «чем заняться» сейчас")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
     logsetup.attach()
@@ -363,6 +398,10 @@ def main() -> int:
         return cmd_read()
     if args.news:
         return cmd_news()
+    if args.drives:
+        return cmd_drives()
+    if args.agenda:
+        return cmd_agenda()
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     try:

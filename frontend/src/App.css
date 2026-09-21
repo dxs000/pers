@@ -182,3 +182,13 @@
     border-right-color: var(--border);
   }
 }
+
+/* Вкладка «жизнь» (Шаг 57) */
+.life { display: flex; flex-direction: column; gap: 1.5rem; padding-bottom: 2rem; }
+.life h2 { margin: 0; }
+.life h3 { margin: 0 0 .5rem; font-size: 1rem; }
+.life ul { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: .45rem; }
+.life-sub { margin: .25rem 0 .5rem; opacity: .75; }
+.life-muted { opacity: .6; font-size: .9em; }
+.life-outcome { margin-top: .2rem; font-style: italic; opacity: .85; }
+.life details { margin-top: .6rem; }

@@ -78,6 +78,17 @@ def _build_choice_prompt(turn: Turn, shelf: dict) -> str:
             "Что у тебя сейчас не закончено:\n"
             + "\n".join(f"- {t['text']}" for t in turn.threads) + "\n")
 
+    # Шаг 56. Книгу берут не под характер, а под то, чего хочется и что
+    # тревожит. Связи «книга под побуждение» в базе нет — она появится в
+    # `picked_why`, если так и есть.
+    drives = getattr(turn, "drives", None) or []
+    if drives:
+        import drives as drives_mod
+        parts.append(
+            "Что в тебе сейчас живёт:\n"
+            + "\n".join(f"- {drives_mod.KIND_WORDS_YOU[d['kind']]}: {d['text']}"
+                        for d in drives) + "\n")
+
     parts.append(
         "На руках пусто, на полке есть непрочитанное — обычный вечер это "
         "взять одну. Толщина не причина пройти мимо: сегодня один кусок.\n"

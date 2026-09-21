@@ -171,6 +171,80 @@ class PgEngine:
     def memories_since(self, at) -> int:
         return self._pg.memories_since(self.conn, at)
 
+    # --- Характер (Шаг 56) ---------------------------------------------------
+    # Модулем рядом, а не функциями `store_pg`: см. `store_character`.
+    def record_traits(self, found, now: datetime) -> None:
+        import store_character
+        store_character.record_traits(self.conn, found, now)
+
+    def trait_reasons(self) -> dict:
+        import store_character
+        return store_character.trait_reasons(self.conn)
+
+    def trait_history(self) -> list[dict]:
+        import store_character
+        return store_character.trait_history(self.conn)
+
+    def open_drives(self, now: datetime, limit: int | None = None) -> list[dict]:
+        import store_character
+        return store_character.open_drives(self.conn, now, limit)
+
+    def all_drives(self) -> list[dict]:
+        import store_character
+        return store_character.all_drives(self.conn)
+
+    def add_drive(self, kind: str, text: str, basis: str, memory_ids,
+                  now: datetime) -> int:
+        import store_character
+        return store_character.add_drive(self.conn, kind, text, basis,
+                                         memory_ids, now)
+
+    def strengthen_drives(self, ids, now: datetime) -> int:
+        import store_character
+        return store_character.strengthen_drives(self.conn, ids, now)
+
+    def close_drives(self, items, now: datetime) -> int:
+        import store_character
+        return store_character.close_drives(self.conn, items, now)
+
+    def drives_at(self):
+        import store_character
+        return store_character.drives_at(self.conn)
+
+    def set_drives_at(self, now: datetime) -> None:
+        import store_character
+        store_character.set_drives_at(self.conn, now)
+
+    # --- Воля (Шаг 57) -------------------------------------------------------
+    def add_pursuit(self, at, action: str, why: str, about=None,
+                    drive_id=None) -> int:
+        import store_agenda
+        return store_agenda.add_pursuit(self.conn, at, action, why, about, drive_id)
+
+    def set_pursuit_outcome(self, pursuit_id: int, outcome) -> None:
+        import store_agenda
+        store_agenda.set_outcome(self.conn, pursuit_id, outcome)
+
+    def pursuits_between(self, since, until) -> list[dict]:
+        import store_agenda
+        return store_agenda.pursuits_between(self.conn, since, until)
+
+    def recent_pursuits(self, before, limit: int) -> list[dict]:
+        import store_agenda
+        return store_agenda.recent_pursuits(self.conn, before, limit)
+
+    def all_pursuits(self) -> list[dict]:
+        import store_agenda
+        return store_agenda.all_pursuits(self.conn)
+
+    def agenda_at(self):
+        import store_agenda
+        return store_agenda.agenda_at(self.conn)
+
+    def set_agenda_at(self, now: datetime) -> None:
+        import store_agenda
+        store_agenda.set_agenda_at(self.conn, now)
+
     def record_birth(self, name: str, born_at, birthplace: str | None,
                      reason: str) -> bool:
         return self._pg.record_birth(self.conn, name, born_at, birthplace, reason)

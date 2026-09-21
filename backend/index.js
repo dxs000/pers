@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import multer from "multer";
-import { pushInbox, readState, notify, readOpenSessionMessages, readShelf, listenReplies, CHANNEL_INBOX } from "./store_pg.js";
+import { pushInbox, readState, notify, readOpenSessionMessages, readShelf, readLife, listenReplies, CHANNEL_INBOX } from "./store_pg.js";
 import { ensureSourceDir, kindOf, safeName, startConvert, getJob } from "./shelf_source.js";
 import { tailLog } from "./agent_log.js";
 
@@ -103,6 +103,10 @@ app.get("/shelf/convert/:id", (req, res) => {
     ok: job.ok,
     log: job.log,
   });
+});
+
+app.get("/life", async (_req, res) => {
+  res.json(await readLife());
 });
 
 app.get("/log", (_req, res) => {

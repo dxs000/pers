@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import EssayBar from "./EssayBar";
+import Life from "./Life";
 
 const API = import.meta.env.VITE_API_URL;
 const RECONNECT_MS = 3_000;
@@ -177,6 +178,13 @@ export default function App() {
             </button>
             <button
               type="button"
+              className={tab === "life" ? "on" : ""}
+              onClick={() => setTab("life")}
+            >
+              жизнь
+            </button>
+            <button
+              type="button"
               className={tab === "log" ? "on" : ""}
               onClick={() => setTab("log")}
             >
@@ -246,6 +254,10 @@ export default function App() {
             ))}
           </div>
         )}
+      </main>
+      ) : tab === "life" ? (
+      <main className="stage">
+        <Life />
       </main>
       ) : (
       <main className="stage log-stage">
