@@ -21,18 +21,20 @@ def set_memory_embedding(conn, memory_id: int, vec, model: str) -> None:
 
 
 def similar_memories(conn, vec, model: str, limit: int,
-                     floor: float = -1.0, exclude=()) -> list[dict]:
-    """Ближайшие по смыслу, с похожестью. Только посчитанные этой моделью."""
+                     floor: float = -1.0, exclude=(), skip_sources=()) -> list[dict]:
+    """Ближайшие по смыслу, с похожестью. Только посчитанные этой моделью.
+    `skip_sources` — какие источники не рассматривать (например, сны)."""
     rows = conn.execute(
         """SELECT id, happened_at, precision, text, source, weight,
                   embed_dot(embedding, %s::real[]) AS sim
              FROM memories
             WHERE embedding_model = %s AND embedding IS NOT NULL
               AND NOT (id = ANY(%s))
+              AND NOT (source = ANY(%s))
               AND embed_dot(embedding, %s::real[]) >= %s
             ORDER BY sim DESC, id
             LIMIT %s""",
-        (list(vec), model, list(exclude), list(vec), floor, limit),
+        (list(vec), model, list(exclude), list(skip_sources), list(vec), floor, limit),
     ).fetchall()
     # `happened_at` сырой, как у всех строк базы: в строку его переводит
     # читатель (`build_snapshot` — через `iso`), и двойной перевод сломал бы его.

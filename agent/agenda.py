@@ -82,8 +82,12 @@ DAYDREAM_TTL_HOURS = 8.0
 # и становится тем, что человек о себе помнит лучше всего.
 RETURN_BUMP = 0.3
 # С какой похожести вспомнившееся считается тем же, что уже записано (Шаг 58).
-# Правится на живом: `agent.py --embed "..."` показывает шкалу модели.
-SAME_FLOOR = float(os.getenv("EMBED_SAME_FLOOR", "0.9"))
+# Откалибровано на живой биографии (Шаг 58.2): пересказ строки своими словами
+# дал 0.83 (режим doc), самые похожие из РАЗНЫХ воспоминаний — не выше 0.63.
+# Порог ближе к верхнему краю, потому что ошибки несимметричны: пропущенный
+# дубль дойдёт до сверки, как раньше, а ложное совпадение выбросит настоящее
+# новое воспоминание.
+SAME_FLOOR = float(os.getenv("EMBED_SAME_FLOOR", "0.78"))
 REACH_URGE = 1.3
 REACH_TTL_HOURS = 6.0
 
@@ -493,7 +497,11 @@ def _recall(eng, edges, turn, choice, drives, now, tz) -> str | None:
     import embed as embed_mod
     vec = embed_mod.embed(text, "doc", edges)
     if vec is not None:
-        near = eng.similar_memories(vec, embed_mod.DOC_MODEL, 1)
+        # Сны в поиске дубля не участвуют (Шаг 58.2): вспомнилось настоящее,
+        # похожее на сон, — это не «возврат ко сну», а событие, которое сон
+        # переиначил. Ему дорога на сверку, как любому новому.
+        near = eng.similar_memories(vec, embed_mod.DOC_MODEL, 1,
+                                    skip_sources=("dream",))
         if near:
             log.info("вспоминание: ближе всего #%s (%.3f)", near[0]["id"], near[0]["sim"])
         if near and near[0]["sim"] >= SAME_FLOOR:

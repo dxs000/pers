@@ -206,7 +206,8 @@ def handle_turn(eng, edges: Edges, text: str, now: datetime, *,
     turn = eng.snapshot(now)
     findings = look_outward(eng, text, turn.objects, edges, now)
     previous = eng.last_exchange()
-    about = embed_mod.embed(text, "query", edges)
+    about = embed_mod.embed(embed_mod.query_text(text, eng.working_memory()),
+                            "query", edges)
     try:
         messages = (
             [{"role": "system",

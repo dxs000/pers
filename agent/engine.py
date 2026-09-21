@@ -66,9 +66,10 @@ class PgEngine:
         store_embed.set_memory_embedding(self.conn, memory_id, vec, model)
 
     def similar_memories(self, vec, model: str, limit: int, floor: float = -1.0,
-                         exclude=()) -> list[dict]:
+                         exclude=(), skip_sources=()) -> list[dict]:
         import store_embed
-        return store_embed.similar_memories(self.conn, vec, model, limit, floor, exclude)
+        return store_embed.similar_memories(self.conn, vec, model, limit, floor,
+                                            exclude, skip_sources)
 
     def embedded_count(self, model: str) -> tuple[int, int]:
         import store_embed

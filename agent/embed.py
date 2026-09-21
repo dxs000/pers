@@ -103,6 +103,29 @@ def embed(text: str, kind: str, edges) -> list[float] | None:
     return normalize([float(x) for x in vec])
 
 
+# Короткая реплика (Шаг 58.2). На двух абстрактных словах («первая работа»)
+# модель находит верный ответ, но с похожестью на уровне шума (0.35 против
+# 0.30–0.41), и порог 0.45 не пускает ничего. В разговоре такие реплики
+# обычно продолжают сказанное им: «а ты где работал-то?» — о том, что было в
+# его последнем ответе. Поэтому короткая реплика ищется вместе с его
+# предыдущей репликой: тема разговора там.
+SHORT_REPLY_WORDS = 8
+CONTEXT_CHARS = 300
+
+
+def query_text(text: str, memory: list[dict] | None) -> str:
+    """Что векторизовать как запрос: реплику, а короткую — с контекстом."""
+    body = " ".join((text or "").split())
+    if len(body.split()) >= SHORT_REPLY_WORDS:
+        return body
+    last = next((m.get("content") for m in reversed(memory or [])
+                 if m.get("role") == "assistant" and m.get("content")), None)
+    if not last:
+        return body
+    context = " ".join(last.split())[-CONTEXT_CHARS:]
+    return f"{context}\n{body}"
+
+
 def normalize(vec: list[float]) -> list[float] | None:
     norm = math.sqrt(sum(x * x for x in vec))
     if norm == 0.0:
