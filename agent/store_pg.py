@@ -38,6 +38,7 @@
 """
 
 import json
+import os
 
 import psycopg
 import psycopg.sql
@@ -53,6 +54,12 @@ from snapshot import (SESSION_GAP_HOURS, WORKING_MEMORY_EXCHANGES, Turn, iso,
 SALIENCE_FLOOR = 0.05
 THREADS_SNAPSHOT_LIMIT = 3
 MEMORIES_LIMIT = 3
+# Сколько воспоминаний добавить по смыслу реплики и с какой похожести
+# (Шаг 58). Порог правится на живом, как `RETRIEVER_COOLDOWN`: у модели
+# Яндекса своя шкала, и `agent.py --embed "..."` показывает её на его же
+# биографии.
+RELEVANT_LIMIT = int(os.getenv("EMBED_RELEVANT_LIMIT", "2"))
+RELEVANT_FLOOR = float(os.getenv("EMBED_RELEVANT_FLOOR", "0.45"))
 SELF_ID = 0
 
 # Затухание побуждения. Форма та же, что у важности объектов
@@ -196,7 +203,7 @@ def _snapshot_drives(conn, now) -> list[dict]:
             for d in store_character.open_drives(conn, now, DRIVES_SNAPSHOT_LIMIT)]
 
 
-def build_snapshot(conn, now, limit: int = 7) -> Turn:
+def build_snapshot(conn, now, limit: int = 7, about=None) -> Turn:
     """Снимок хода из базы. Та же форма, что у `store.build_snapshot`.
 
     Шесть запросов на ход, и это осознанно: агрегировать всё в один
@@ -274,6 +281,18 @@ def build_snapshot(conn, now, limit: int = 7) -> Turn:
         """,
         (now, MEMORIES_LIMIT),
     ).fetchall()
+
+    # По смыслу (Шаг 58): к отобранным по весу добавляются близкие к реплике.
+    # ДОБАВЛЯЮТСЯ, а не заменяют: «тяжёлое» воспоминание — то, что у человека
+    # на уме вообще, и оно не должно пропадать оттого, что разговор о другом.
+    # Порог отсекает «ближайшее из далёкого»: без него на любую реплику
+    # всплывали бы два воспоминания, даже если к разговору не относится ни одно.
+    if about is not None:
+        import store_embed
+        vec, model = about
+        memories = list(memories) + store_embed.similar_memories(
+            conn, vec, model, RELEVANT_LIMIT, RELEVANT_FLOOR,
+            exclude=[m["id"] for m in memories])
 
     by_object = _assertions_by_object(conn, [r["id"] for r in top] + [SELF_ID])
 

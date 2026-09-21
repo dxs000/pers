@@ -101,6 +101,7 @@ from openai import OpenAIError
 # его `cycle` — проходом за проходом, — и `mind.VERDICT_WRITE` рядом с
 # `mind.check_memory` читается как один слой, а не как россыпь имён.
 import agenda as agenda_mod
+import embed as embed_mod
 import mind
 import drives as drives_mod
 import news as news_mod
@@ -463,6 +464,22 @@ class _StubLLM:
         )
 
 
+def _fake_vector(text: str, dims: int = 256) -> list[float]:
+    """Детерминированный «смысл»: мешок основ слов, захэшированный в `dims`.
+
+    Не модель, а её грубая тень, и ровно этого хватает сбруе: тексты с общими
+    словами получаются близкими, без общих — далёкими, и числа одинаковы на
+    любой машине. Основа — первые четыре буквы слова от четырёх букв: так
+    «первая» и «первую» совпадают, как совпали бы у настоящей модели.
+    """
+    import re as _re
+    import zlib
+    vec = [0.0] * dims
+    for word in _re.findall(r"[а-яёa-z]{4,}", text.lower()):
+        vec[zlib.crc32(word[:4].encode("utf-8")) % dims] += 1.0
+    return vec
+
+
 class _FakeNet:
     """Оба сетевых края разом: `get` — погода, `post` — поиск.
 
@@ -476,6 +493,11 @@ class _FakeNet:
         return self._reply(_FORECAST_PAYLOAD)
 
     def post(self, url, json=None, headers=None, **kwargs):
+        # Шаг 58: тот же клиент ходит и за векторами. Различение по адресу, а
+        # не по телу: так ходит и настоящий `embed.embed`.
+        if "textEmbedding" in url:
+            return self._reply({"embedding": _fake_vector((json or {}).get("text", "")),
+                                "numTokens": "0"})
         return self._reply(_SEARCH_PAYLOAD)
 
     @staticmethod
@@ -528,6 +550,12 @@ _SEARCH_PAYLOAD = {
 # здесь, а не взята из `.env`, по тому же правилу, что пояс `TZ`: эталон не
 # должен зависеть от того, настроен ли поиск на машине, где его гоняют.
 os.environ["YANDEX_FOLDER_ID"] = "папка-заглушка"
+# Её же читает край векторов (Шаг 58) — но из `config`, куда она попала при
+# импорте из `.env`. Прибита и там, по тому же правилу.
+config.YANDEX_FOLDER_ID = "папка-заглушка"
+# Темп векторов (Шаг 58.1) в сбруе не нужен: заглушка квоты не знает, а сон
+# между вызовами только растянул бы прогон.
+embed_mod.MIN_INTERVAL = 0.0
 
 # **Ходов в сценарии ДВА, и это не щедрость.** Одним ходом не проверяется
 # ровно то, ради чего шаг делался: состояние МЕЖДУ ходами. У одного хода
@@ -766,6 +794,7 @@ _CURIOSITY = {"curiosity": None}
 _NEWS = {"news": None}
 _DRIVES = {"drives": None}
 _AGENDA = {"agenda": None}
+_EMBED = {"embed": None}
 
 # Двенадцатое семейство: черты (Шаг 42). Отдельно от сценариев записи
 # (`writes`), хотя тоже про запись: те сверяют СНИМОК после слияния, а здесь
@@ -836,7 +865,7 @@ _PROMISES = {"promises": None}
 _READING = {"reading": None}
 
 SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
-             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_NEWS, **_DRIVES, **_AGENDA, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
+             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_NEWS, **_DRIVES, **_AGENDA, **_EMBED, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
              **_READING, **_BIRTH, **_INSPECT, **_HTTP, **_GENESIS}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
@@ -2942,6 +2971,92 @@ def _run_agenda() -> str:
     )
 
 
+# --- Сценарий ПАМЯТИ ПО СМЫСЛУ (Шаг 58) --------------------------------------
+# Векторы здесь — `_fake_vector`, мешок основ слов: числа не те, что даст
+# модель Яндекса, но механика та же, и видно каждое её решение:
+#
+#   1. фоновый проход досчитывает векторы биографии пачкой; второй заход —
+#      досчитывать нечего;
+#   2. реплика про первую работу: воспоминание с весом 0.2, которое по весу
+#      не всплывает никогда, попадает в промпт и отмечается вспомненным;
+#   3. реплика ни о чём из биографии: добавлять нечего, порог не пропускает
+#      «ближайшее из далёкого»;
+#   4. вспоминание пересказало записанное: засчитано возвратом по вектору,
+#      сверка НЕ звалась;
+#   5. вспоминание принесло новое: вектор далёк, сверка звалась, строка
+#      записана, и следующий фоновый заход досчитал ей вектор.
+EMBED_TALK = "А помнишь первую работу не по специальности?"
+EMBED_EMPTY = "Как там погода?"
+
+_EMBED_SCRIPT = [
+    ("решение", '{"do": "вспоминать", "about": "день, когда решил уехать", "why": "опять про Кутаиси", "drive": null}'),
+    ("вспоминание", '{"recalled": {"age": 17, "precision": "day", "text": "Помню тот день, когда решил, что уеду. Ничего в тот день не случилось, и поэтому он запомнился."}}'),
+    ("решение", '{"do": "вспоминать", "about": "лето у деда", "why": "запах сена в новостях", "drive": null}'),
+    ("вспоминание", '{"recalled": {"age": 14, "precision": "year", "text": "В девятом классе я впервые поехал один к деду в деревню и всю дорогу стоял в тамбуре."}}'),
+    ("сверка", "записать"),
+]
+
+
+def _run_embed() -> str:
+    """Память по смыслу: что всплывает к реплике и как ловится пересказ."""
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_EMBED_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка",
+                        ai_key="ключ-ai-заглушка")
+    first = embed_mod.embed_tick(eng, edges)
+    second = embed_mod.embed_tick(eng, edges)
+
+    def recalled(about_text):
+        vec = embed_mod.embed(about_text, "query", edges)
+        near = eng.similar_memories(vec, embed_mod.DOC_MODEL, 3)
+        memories = eng.snapshot(NOW, about=vec).memories
+        return near, [m["id"] for m in memories], vec
+
+    plain = [m["id"] for m in eng.snapshot(NOW).memories]
+    near_talk, with_talk, vec_talk = recalled(EMBED_TALK)
+    near_empty, with_empty, _ = recalled(EMBED_EMPTY)
+    prompt = cycle.prompt_and_latch(eng, edges, NOW, about=vec_talk, tz=TZ)
+    block = prompt.split("Что тебе сейчас вспоминается")[1].split("\n\n")[0]
+    weight5 = [m for m in eng.all_memories() if m["id"] == 5][0]["weight"]
+
+    runs = [agenda_mod.agenda_tick(eng, edges, NOW + timedelta(hours=h), tz=TZ)
+            for h in (2, 4)]
+    third = embed_mod.embed_tick(eng, edges)
+
+    def fmt(near):
+        return ", ".join(f"#{m['id']} {m['sim']:.3f}" for m in near) or "—"
+
+    return (
+        f"фоновый проход: досчитал {first}; второй заход: {second!r}\n"
+        f"  (пачка {embed_mod.EMBED_BATCH}, модель {embed_mod.DOC_MODEL})\n"
+        f"{'=' * 60}\n"
+        f"по весу, без реплики: {plain}\n"
+        f"«{EMBED_TALK}»\n"
+        f"  ближе всего: {fmt(near_talk)}\n"
+        f"  в снимке: {with_talk}\n"
+        f"«{EMBED_EMPTY}»\n"
+        f"  ближе всего: {fmt(near_empty)}\n"
+        f"  в снимке: {with_empty}\n"
+        f"  (добавляется до {store_pg.RELEVANT_LIMIT}, от похожести {store_pg.RELEVANT_FLOOR})\n"
+        f"{'=' * 60}\n"
+        f"БЛОК ВОСПОМИНАНИЙ в промпте разговора:\n"
+        f"Что тебе сейчас вспоминается{block}\n"
+        f"вес #5 после разговора: {weight5:.1f} (было 0.2 — вспомнил к слову)\n"
+        f"{'=' * 60}\n"
+        f"вспоминание 1 (пересказ записанного): {runs[0]!r}\n"
+        f"вспоминание 2 (новое): {runs[1]!r}\n"
+        f"  (дубль — от похожести {agenda_mod.SAME_FLOOR})\n"
+        f"фоновый проход после: досчитал {third}\n"
+        f"{'=' * 60}\n"
+        f"вызовы модели по порядку (сверка — только у нового):\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+        + f"\n{'=' * 60}\n"
+        f"{_dump_memories(eng)}"
+    )
+
+
 def _run_initiative() -> str:
     """Персонаж заговаривает сам: три захода, из них говорящий один.
 
@@ -3483,6 +3598,8 @@ def render(name: str) -> str:
         return _run_drives()
     if name == "agenda":
         return _run_agenda()
+    if name == "embed":
+        return _run_embed()
     if name == "traits":
         return _run_traits()
     if name == "promises":

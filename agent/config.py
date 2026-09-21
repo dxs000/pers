@@ -36,6 +36,10 @@ YANDEX_SEARCH_API_KEY = (
 ).strip()
 YANDEX_FOLDER_ID = (os.getenv("YANDEX_FOLDER_ID") or "").strip()
 TAVILY_API_KEY = YANDEX_SEARCH_API_KEY
+# Ключ AI Studio (Шаг 58): эмбеддинги и, позже, модели Яндекса. Отдельная
+# переменная, потому что у ключа поиска может не быть области
+# `yc.ai.languageModels.execute`; не задан — берётся ключ поиска.
+YANDEX_API_KEY = (os.getenv("YANDEX_API_KEY") or YANDEX_SEARCH_API_KEY or "").strip()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL", "")

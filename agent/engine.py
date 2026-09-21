@@ -48,8 +48,31 @@ class PgEngine:
     def close(self) -> None:
         self.conn.close()
 
-    def snapshot(self, now: datetime) -> Turn:
-        return self._pg.build_snapshot(self.conn, now)
+    def snapshot(self, now: datetime, about=None) -> Turn:
+        # `about` — вектор реплики (Шаг 58); без него снимок прежний.
+        if about is None:
+            return self._pg.build_snapshot(self.conn, now)
+        import embed
+        return self._pg.build_snapshot(self.conn, now,
+                                       about=(about, embed.model_tag("doc")))
+
+    # --- Векторы (Шаг 58) ----------------------------------------------------
+    def memories_to_embed(self, model: str, limit: int) -> list[dict]:
+        import store_embed
+        return store_embed.memories_to_embed(self.conn, model, limit)
+
+    def set_memory_embedding(self, memory_id: int, vec, model: str) -> None:
+        import store_embed
+        store_embed.set_memory_embedding(self.conn, memory_id, vec, model)
+
+    def similar_memories(self, vec, model: str, limit: int, floor: float = -1.0,
+                         exclude=()) -> list[dict]:
+        import store_embed
+        return store_embed.similar_memories(self.conn, vec, model, limit, floor, exclude)
+
+    def embedded_count(self, model: str) -> tuple[int, int]:
+        import store_embed
+        return store_embed.embedded_count(self.conn, model)
 
     # --- Биография (Шаг 38) --------------------------------------------------
     def all_memories(self) -> list[dict]:

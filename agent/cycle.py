@@ -11,6 +11,7 @@ import genesis
 import library
 import outside
 import sky as sky_mod
+import embed as embed_mod
 # Выбор книги живёт в `shelf_choice` (Шаг 49.1). До Шага 56 он подменялся
 # здесь из `agent.py` присваиванием `cycle.choose_book = ...`, и сбруя, которая
 # `agent.py` не импортирует, проверяла копию из `mind`, а демон жил другой.
@@ -37,6 +38,11 @@ class Edges:
     http: Any = None
     search: Any = None
     search_key: str = ""
+    # Ключ AI Studio (Шаг 58). Пустой — векторов нет, память работает по весу.
+    # Отдельно от `search_key`, потому что сбруя заводит поиск во всех
+    # сценариях, а векторы — только в своём: иначе каждый прежний эталон
+    # поменялся бы от того, что появился новый край.
+    ai_key: str = ""
 
     def close(self) -> None:
         for client in (self.http, self.search):
@@ -66,6 +72,7 @@ def open_edges() -> Edges:
         http=config.get_sync_client(timeout=NET_TIMEOUT),
         search=web.build_search_client(SEARCH_TIMEOUT),
         search_key=config.TAVILY_API_KEY,
+        ai_key=config.YANDEX_API_KEY,
     )
 
 
@@ -81,12 +88,16 @@ def weather_snapshot(place: dict, edges: Edges, now_dt: datetime) -> dict | None
 
 
 def prompt_and_latch(eng, edges: Edges, now_dt: datetime, previous=None,
-                     findings: list[dict] | None = None, tz=None) -> str:
+                     findings: list[dict] | None = None, tz=None,
+                     about: list[float] | None = None) -> str:
     tz = tz or config.TZ
     place = eng.place()
     snap = sky_mod.local_snapshot(place.get("lat"), place.get("lon"), now_dt, tz)
     wx = weather_snapshot(place, edges, now_dt)
-    turn = eng.snapshot(now_dt)
+    # `about` — вектор реплики собеседника (Шаг 58). К воспоминаниям по весу
+    # добавляются близкие по смыслу, и они отмечаются вспомненными ниже тем же
+    # `touch_recall`: вспомнить к слову — тоже вспомнить.
+    turn = eng.snapshot(now_dt, about=about)
     prompt = build_system_prompt(
         turn,
         now_dt.astimezone(tz),
@@ -195,10 +206,12 @@ def handle_turn(eng, edges: Edges, text: str, now: datetime, *,
     turn = eng.snapshot(now)
     findings = look_outward(eng, text, turn.objects, edges, now)
     previous = eng.last_exchange()
+    about = embed_mod.embed(text, "query", edges)
     try:
         messages = (
             [{"role": "system",
-              "content": prompt_and_latch(eng, edges, now, previous, findings, tz)}]
+              "content": prompt_and_latch(eng, edges, now, previous, findings, tz,
+                                          about=about)}]
             + eng.working_memory()
             + [{"role": "user", "content": text}]
         )

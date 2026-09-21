@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 
@@ -80,6 +81,9 @@ DAYDREAM_TTL_HOURS = 8.0
 # у всплывшего к слову (`store_pg.RECALL_BUMP`): то, к чему возвращаются сами,
 # и становится тем, что человек о себе помнит лучше всего.
 RETURN_BUMP = 0.3
+# С какой похожести вспомнившееся считается тем же, что уже записано (Шаг 58).
+# Правится на живом: `agent.py --embed "..."` показывает шкалу модели.
+SAME_FLOOR = float(os.getenv("EMBED_SAME_FLOOR", "0.9"))
 REACH_URGE = 1.3
 REACH_TTL_HOURS = 6.0
 
@@ -481,6 +485,22 @@ def _recall(eng, edges, turn, choice, drives, now, tz) -> str | None:
     if not (0 <= age <= age_now) or precision not in ("era", "year", "month", "day") \
             or not text:
         return "не вспомнилось"
+    # Дубль ловится вектором ДО сверки (Шаг 58). Мысль, пересказавшая
+    # записанное своими словами, — это возврат к нему, и он засчитывается как
+    # возврат: вес строки растёт, модель сверки не зовётся. Порог высокий
+    # намеренно: ложное совпадение выбросило бы настоящее новое воспоминание,
+    # а пропущенное совпадение всего лишь дойдёт до сверки, как раньше.
+    import embed as embed_mod
+    vec = embed_mod.embed(text, "doc", edges)
+    if vec is not None:
+        near = eng.similar_memories(vec, embed_mod.DOC_MODEL, 1)
+        if near:
+            log.info("вспоминание: ближе всего #%s (%.3f)", near[0]["id"], near[0]["sim"])
+        if near and near[0]["sim"] >= SAME_FLOOR:
+            with eng.unit():
+                eng.touch_recall([near[0]["id"]], now, RETURN_BUMP)
+            return f"вернулся к #{near[0]['id']}: {_clip(near[0]['text'], 200)}"
+
     happened_at = born + timedelta(days=age * timeutil.DAYS_IN_YEAR)
     verdict = check_memory({"age": age, "precision": precision, "text": text,
                             "happened_at": iso(happened_at)}, canon, born, edges.llm)

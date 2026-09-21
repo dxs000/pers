@@ -19,6 +19,7 @@ import essay as essay_mod
 import news as news_mod
 import drives as drives_mod
 import agenda as agenda_mod
+import embed as embed_mod
 from mind import summarize_session
 
 POLL_SECONDS = 5.0
@@ -203,6 +204,13 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
             return
     except Exception as err:
         logging.warning("решение, чем заняться, не состоялось: %s", err)
+    # Векторы досчитываются без модели и без заслонок (Шаг 58): свежая строка
+    # биографии должна находиться по смыслу уже в следующем разговоре.
+    try:
+        if embed_mod.embed_tick(eng, edges) is not None:
+            return
+    except Exception as err:
+        logging.warning("векторы не досчитаны: %s", err)
     try:
         cycle.background_tick(
             eng, edges, datetime.now(timezone.utc),
@@ -303,6 +311,45 @@ def cmd_agenda() -> int:
     return 0
 
 
+def cmd_embed(text: str | None) -> int:
+    """Досчитать векторы биографии и показать, что ближе к `text` (Шаг 58).
+
+    Это же — проверка ключа и шкалы: пороги `EMBED_RELEVANT_FLOOR` и
+    `EMBED_SAME_FLOOR` подбираются по тому, какие числа модель даёт на ЕГО
+    биографии, а не на примере из документации.
+    """
+    edges = cycle.open_edges()
+    eng = engine_mod.open_engine()
+    try:
+        if not embed_mod.enabled(edges):
+            print("векторы выключены: нужен YANDEX_API_KEY (или ключ поиска) и YANDEX_FOLDER_ID")
+            return 1
+        while embed_mod.embed_tick(eng, edges, batch=50):
+            pass
+        done, total = eng.embedded_count(embed_mod.DOC_MODEL)
+        print(f"посчитано векторов: {done} из {total} ({embed_mod.DOC_MODEL})")
+        if done < total:
+            print("досчитать не вышло — причина в логе строками выше")
+        if not text:
+            return 0
+        for kind in ("query", "doc"):
+            vec = embed_mod.embed(text, kind, edges)
+            if vec is None:
+                print(f"{kind}: вектор не получен")
+                continue
+            print(f"\nближе всего к «{text}» ({kind}):")
+            for m in eng.similar_memories(vec, embed_mod.DOC_MODEL, 7):
+                print(f"  {m['sim']:.3f}  #{m['id']:<4} {m['text'][:90]}")
+        print("\nпороги: в разговор — от", end=" ")
+        import store_pg
+        print(f"{store_pg.RELEVANT_FLOOR} (query); дубль при вспоминании — от "
+              f"{agenda_mod.SAME_FLOOR} (doc)")
+    finally:
+        eng.close()
+        edges.close()
+    return 0
+
+
 def cmd_genesis(first_text: str, write: bool) -> int:
     edges = cycle.open_edges()
     eng = engine_mod.open_engine()
@@ -384,6 +431,8 @@ def main() -> int:
                         help="один проход побуждений сейчас и что открыто")
     parser.add_argument("--agenda", action="store_true",
                         help="одно решение «чем заняться» сейчас")
+    parser.add_argument("--embed", nargs="?", const="", metavar="ТЕКСТ",
+                        help="досчитать векторы биографии; с текстом — показать ближайшие")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
     logsetup.attach()
@@ -402,6 +451,8 @@ def main() -> int:
         return cmd_drives()
     if args.agenda:
         return cmd_agenda()
+    if args.embed is not None:
+        return cmd_embed(args.embed or None)
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     try:
