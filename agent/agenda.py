@@ -76,6 +76,10 @@ DAYDREAM_URGE = 1.1
 DAYDREAM_TTL_HOURS = 8.0
 # «Захотелось написать» — сильнее прочих: это не повод, а само желание. Но
 # и протухает быстрее всех: через шесть часов это уже не то желание.
+# Прибавка веса, когда он НАРОЧНО вернулся к воспоминанию. Втрое больше, чем
+# у всплывшего к слову (`store_pg.RECALL_BUMP`): то, к чему возвращаются сами,
+# и становится тем, что человек о себе помнит лучше всего.
+RETURN_BUMP = 0.3
 REACH_URGE = 1.3
 REACH_TTL_HOURS = 6.0
 
@@ -429,16 +433,21 @@ def build_recall_prompt(turn, choice, drives, canon, born, age_now: int) -> str:
         "мелочи, чем повороты.\n\n"
         "Оно не должно противоречить ничему записанному. Не вспомнилось - это "
         "обычный исход: то, что ты запишешь, останется в твоей жизни навсегда.\n\n"
-        "Формат - ТОЛЬКО JSON:\n"
+        "Бывает и так, что мысль приходит к тому, что уже записано выше, и "
+        "дальше не идёт. Это тоже вспоминание, не пустое: тогда назови номер "
+        "этой строки, и новое не придумывай.\n\n"
+        "Формат - ТОЛЬКО JSON, одно из трёх:\n"
         '{"recalled": {"age": 9, "precision": "era", "text": "..."}}\n'
-        f"или {{\"recalled\": null}}. age - сколько тебе было, целое от 0 до "
-        f"{age_now}; precision - 'era', 'year', 'month' или 'day'; text - от "
-        "первого лица, 1-2 фразы."
+        '{"returned": 12}\n'
+        '{"recalled": null}\n'
+        f"age - сколько тебе было, целое от 0 до {age_now}; precision - 'era', "
+        "'year', 'month' или 'day'; text - от первого лица, 1-2 фразы; "
+        "returned - номер # строки, к которой вернулась мысль."
     )
 
 
 def _recall(eng, edges, turn, choice, drives, now, tz) -> str | None:
-    from mind import VERDICT_WRITE, check_memory
+    from mind import VERDICT_KNOWN, VERDICT_WRITE, check_memory
     from snapshot import iso
 
     born = timeutil.parse_ts(turn.born_at or "")
@@ -449,6 +458,17 @@ def _recall(eng, edges, turn, choice, drives, now, tz) -> str | None:
     data = _parse_json(_ask(edges.llm, build_recall_prompt(turn, choice, drives,
                                                            canon, born, age_now),
                             full=True) or "") or {}
+    # Вернулся к записанному (Шаг 57.1). Первая редакция такого исхода не
+    # знала: модель описывала известное своими словами, сверка отвечала «уже
+    # есть», и заход пропадал целиком. Но нарочно вернуться к воспоминанию —
+    # то, от чего оно крепнет, и вес это отражает.
+    returned = _ints_one(data.get("returned"))
+    by_id = {m["id"]: m for m in canon}
+    if returned in by_id:
+        with eng.unit():
+            eng.touch_recall([returned], now, RETURN_BUMP)
+        return f"вернулся к #{returned}: {_clip(by_id[returned]['text'], 200)}"
+
     rec = data.get("recalled")
     if not isinstance(rec, dict):
         return "не вспомнилось"
@@ -465,8 +485,12 @@ def _recall(eng, edges, turn, choice, drives, now, tz) -> str | None:
     verdict = check_memory({"age": age, "precision": precision, "text": text,
                             "happened_at": iso(happened_at)}, canon, born, edges.llm)
     if verdict != VERDICT_WRITE:
+        # Текст остаётся в журнале: о чём он думал, видно и так, даже если в
+        # биографию это не легло. «ничего нового» стирало бы сам заход.
         log.info("вспомнилось, но не записано (%s): %s", verdict, text[:60])
-        return "вспоминал, но ничего нового"
+        if verdict == VERDICT_KNOWN:
+            return f"вспомнилось уже известное: {text}"
+        return f"вспомнилось не так, как было, - не записал: {text}"
     with eng.unit():
         eng.add_memory(happened_at, precision, text, "inferred", now=now)
     return text
@@ -529,6 +553,13 @@ def _parse_json(raw: str):
     try:
         return json.loads(text[start:end + 1])
     except json.JSONDecodeError:
+        return None
+
+
+def _ints_one(value) -> int | None:
+    try:
+        return int(str(value).lstrip("#"))
+    except (TypeError, ValueError):
         return None
 
 

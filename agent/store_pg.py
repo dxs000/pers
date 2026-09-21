@@ -416,7 +416,7 @@ def add_memory(conn, happened_at, precision: str, text: str, source: str,
     ).fetchone()["id"]
 
 
-def touch_recall(conn, memories, now) -> None:
+def touch_recall(conn, memories, now, bump: float = RECALL_BUMP) -> None:
     """Отметить всплывшее вспомненным: сдвинуть метку и чуть прибавить вес.
 
     **Зовётся не на чтении снимка, а там, где снимок УЕХАЛ В МОДЕЛЬ.** Разница
@@ -449,7 +449,7 @@ def touch_recall(conn, memories, now) -> None:
                weight = least(weight + %s, %s)
          WHERE id = ANY(%s)
         """,
-        (now, RECALL_BUMP, RECALL_CEILING, ids),
+        (now, bump, RECALL_CEILING, ids),
     )
 
 

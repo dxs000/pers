@@ -61,8 +61,13 @@ class PgEngine:
                                    source, weight, now)
 
     # --- Сон и вспоминание (Шаг 40) -----------------------------------------
-    def touch_recall(self, memories, now: datetime) -> None:
-        self._pg.touch_recall(self.conn, memories, now)
+    def touch_recall(self, memories, now: datetime, bump: float | None = None) -> None:
+        # `bump` — Шаг 57.1: вернуться к воспоминанию нарочно весит больше,
+        # чем вспомнить его к слову. По умолчанию — прибавка хранилища.
+        if bump is None:
+            self._pg.touch_recall(self.conn, memories, now)
+        else:
+            self._pg.touch_recall(self.conn, memories, now, bump)
 
     # --- Нити (Шаг 47) -------------------------------------------------------
     def open_threads(self, side: str = "self", limit: int | None = None) -> list[dict]:
