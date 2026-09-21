@@ -173,6 +173,30 @@ async function safeRows(sql, params = []) {
   }
 }
 
+// Шаг 61: мысли вслух. Внутреннее — то, что он делал и видел один: дела по
+// своей воле (кроме «ничего»), сны, прожитое днём, вспомнившееся. Отдаётся
+// рядом с разговором, чтобы экран не молчал, когда молчит только чат.
+// Схема та же, что у агента: ничего нового в базе ради этого не заводится.
+export async function readInner(hours = 36) {
+  const pursuits = await safeRows(
+    `SELECT 'p' || id AS id, 'pursuit' AS kind, action, about, outcome AS text, at AS ts
+       FROM pursuits
+      WHERE action <> 'rest' AND at > now() - make_interval(hours => $1)
+      ORDER BY at`,
+    [hours]
+  );
+  const memories = await safeRows(
+    `SELECT 'm' || id AS id, source AS kind, NULL AS action, NULL AS about, text,
+            created_at AS ts
+       FROM memories
+      WHERE source IN ('dream', 'lived', 'inferred')
+        AND created_at > now() - make_interval(hours => $1)
+      ORDER BY created_at`,
+    [hours]
+  );
+  return [...pursuits, ...memories].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+}
+
 export async function readLife() {
   const [agent] = await safeRows(
     `SELECT name, born_at, birthplace, place_label, traits, mood, mood_reason, mood_since
@@ -201,6 +225,19 @@ export async function readLife() {
       ORDER BY created_at DESC, id DESC LIMIT 20`
   );
   const total = await safeRows("SELECT count(*)::int AS n FROM memories");
+  // Шаг 59–60: он и голос. Отдельные запросы через safeRows: на базе до
+  // миграции 0018 колонок нет, и панель должна показать остальное.
+  const [him] = await safeRows(
+    `SELECT him_view AS view, him_at AS at, talk, talk_why FROM agent WHERE id = 1`
+  );
+  const himFacts = await safeRows(
+    `SELECT id, text, noted_at, hits FROM him_facts
+      WHERE dropped_at IS NULL ORDER BY touched_at DESC, id DESC LIMIT 20`
+  );
+  const himThreads = await safeRows(
+    `SELECT id, text, opened_at FROM threads
+      WHERE side = 'user' AND closed_at IS NULL ORDER BY touched_at DESC`
+  );
   return {
     agent: agent ?? null,
     drives,
@@ -208,5 +245,6 @@ export async function readLife() {
     pursuits,
     memories,
     memoriesTotal: total[0]?.n ?? 0,
+    him: him ? { ...him, facts: himFacts, threads: himThreads } : null,
   };
 }

@@ -20,6 +20,8 @@ import news as news_mod
 import drives as drives_mod
 import agenda as agenda_mod
 import embed as embed_mod
+import him as him_mod
+import voice as voice_mod
 from mind import summarize_session
 
 POLL_SECONDS = 5.0
@@ -139,6 +141,13 @@ def finish_session(eng, now: datetime, edges: cycle.Edges) -> dict | None:
             cycle.record_curiosity(eng, edges, eng.snapshot(now), buf, now)
         except Exception as err:
             logging.warning("finish_session: любопытство не собралось: %s", err)
+        # Шаг 59: кто он мне теперь. После любопытства, а не до: тот проход
+        # смотрит на разговор глазами «о чём спросить», этот — «кого я
+        # узнал», и снимок ему нужен уже с закрытой сессией в эпизодах.
+        try:
+            him_mod.learn(eng, edges, eng.snapshot(now), buf, now)
+        except Exception as err:
+            logging.warning("finish_session: о нём не собралось: %s", err)
     return episode
 
 
@@ -166,6 +175,19 @@ def drain(eng, edges: cycle.Edges) -> None:
             return
 
 
+def _inner(eng) -> None:
+    """Экран, покажи: внутри что-то случилось (Шаг 61).
+
+    Тот же канал, что у реплики. Отдельный канал значил бы второго
+    слушателя в Express и вторую подписку в браузере ради одного и того же
+    действия — перечитать `/session`, где теперь лежит и внутреннее.
+    """
+    try:
+        store_pg.notify(eng.conn, store_pg.CHANNEL_REPLY)
+    except Exception as err:
+        logging.debug("notify: %s", err)
+
+
 def idle_tick(eng, edges: cycle.Edges) -> None:
     now = datetime.now(timezone.utc)
     try:
@@ -178,11 +200,13 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
         logging.warning("напоминание не удалось: %s", err)
     try:
         if cycle.day_tick(eng, edges, now) is not None:
+            _inner(eng)
             return
     except Exception as err:
         logging.warning("день не подведён: %s", err)
     try:
         if cycle.dream_tick(eng, edges, now) is not None:
+            _inner(eng)
             return
     except Exception as err:
         logging.warning("сон не приснился: %s", err)
@@ -191,6 +215,13 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
             return
     except Exception as err:
         logging.warning("черты не пересмотрены: %s", err)
+    # Голос (Шаг 60) — сразу за чертами: тяга говорить выводится из них, и
+    # пересмотренные черты с прежней тягой — два разных человека в одном.
+    try:
+        if voice_mod.talk_tick(eng, edges, now) is not None:
+            return
+    except Exception as err:
+        logging.warning("тяга говорить не выведена: %s", err)
     try:
         if drives_mod.drives_tick(eng, edges, now) is not None:
             return
@@ -201,6 +232,7 @@ def idle_tick(eng, edges: cycle.Edges) -> None:
     # дела, которые не выбирают: обещания, итог дня, сон, пересмотр себя.
     try:
         if agenda_mod.agenda_tick(eng, edges, now) is not None:
+            _inner(eng)
             return
     except Exception as err:
         logging.warning("решение, чем заняться, не состоялось: %s", err)
@@ -308,6 +340,31 @@ def cmd_agenda() -> int:
         print("решения не было — причина строкой выше")
         return 1
     print(got)
+    return 0
+
+
+def cmd_voice() -> int:
+    """Как он сейчас говорит и кто для него собеседник (Шаги 59–60)."""
+    eng = engine_mod.open_engine()
+    try:
+        now = datetime.now(timezone.utc)
+        v = voice_mod.voice(eng, now)
+        t = eng.talk()
+        print("голос:", voice_mod.describe(v))
+        if t.get("why"):
+            print("  тяга — потому что", t["why"])
+        print(f"  тишина сейчас: {cycle.silence_urge(eng, now, v):.2f} "
+              f"(порог {cycle.IMPULSE_FLOOR})")
+        seen = eng.him_view()
+        print("\nон:", seen.get("view") or "(взгляда ещё нет)")
+        for f in eng.him_facts():
+            print(f"  [{f['id']}] {f['text']}")
+        for th in eng.open_threads("user"):
+            print(f"  у него: [{th['id']}] {th['text']}")
+        met = eng.acquaintance()
+        print(f"  знакомы с {met['since']}, разговоров {met['talks']}")
+    finally:
+        eng.close()
     return 0
 
 
@@ -431,6 +488,8 @@ def main() -> int:
                         help="один проход побуждений сейчас и что открыто")
     parser.add_argument("--agenda", action="store_true",
                         help="одно решение «чем заняться» сейчас")
+    parser.add_argument("--voice", action="store_true",
+                        help="как он сейчас говорит и что знает о собеседнике")
     parser.add_argument("--embed", nargs="?", const="", metavar="ТЕКСТ",
                         help="досчитать векторы биографии; с текстом — показать ближайшие")
     args = parser.parse_args()
@@ -451,6 +510,8 @@ def main() -> int:
         return cmd_drives()
     if args.agenda:
         return cmd_agenda()
+    if args.voice:
+        return cmd_voice()
     if args.embed is not None:
         return cmd_embed(args.embed or None)
     signal.signal(signal.SIGTERM, _on_signal)

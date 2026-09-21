@@ -147,6 +147,23 @@ def drives_tick(eng, edges, now: datetime, *, force: bool = False) -> list[str] 
     return changes
 
 
+# Чем кончились дела, у которых есть мысль на выходе (Шаг 62). До шага проход
+# видел «задумался (если бы не уехал)» и не видел, КУДА ушла мысль, — то есть
+# фантазия не имела последствий. Теперь видит; опереться на неё побуждение
+# всё равно не может (номера строк — только из жизни), но направление она
+# показывает, как показывают его сны.
+_RESULT_ACTIONS = {"daydream": "мысль ушла туда", "explore": "взял оттуда",
+                   "tend": "понял"}
+
+
+def _pursuit_result(p: dict) -> str:
+    word = _RESULT_ACTIONS.get(p.get("action"))
+    out = (p.get("outcome") or "").strip()
+    if not word or not out:
+        return ""
+    return f"; {word}: {_one_line(out, 200)}"
+
+
 def _text_of(current: list[dict], drive_id: int) -> str:
     for d in current:
         if d["id"] == drive_id:
@@ -213,7 +230,16 @@ def build_prompt(turn, canon, born, age_now: int, current: list[dict],
         parts.append("Что он делал по своей воле последние дни:\n" + "\n".join(
             f"- {agenda_mod.ACTION_PAST[p['action']]}"
             + (f" ({p['about']})" if p.get("about") else "")
-            + f" - потому что {p['why']}" for p in pursuits) + "\n")
+            + f" - потому что {p['why']}"
+            + _pursuit_result(p) for p in pursuits) + "\n")
+    # Он (Шаг 59). Отношения — тоже то, откуда растут желания и страхи; но
+    # опереться побуждение обязано на строку жизни, как и любое другое.
+    import him as him_mod
+    brief = him_mod.render_brief(turn.him)
+    if brief:
+        parts.append(brief.replace("Он для тебя:", "Тот, с кем он разговаривает, для него:")
+                          .replace("Что у него сейчас происходит:",
+                                   "Что у того сейчас происходит:") + "\n")
     parts.append(_render_current(current) + "\n")
     parts.append(
         "Побуждение - не цель из анкеты («развиваться», «быть счастливым»), а "

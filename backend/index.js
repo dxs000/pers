@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import multer from "multer";
-import { pushInbox, readState, notify, readOpenSessionMessages, readShelf, readLife, listenReplies, CHANNEL_INBOX } from "./store_pg.js";
+import { pushInbox, readState, notify, readOpenSessionMessages, readInner, readShelf, readLife, listenReplies, CHANNEL_INBOX } from "./store_pg.js";
 import { ensureSourceDir, kindOf, safeName, startConvert, getJob } from "./shelf_source.js";
 import { tailLog } from "./agent_log.js";
 
@@ -64,7 +64,11 @@ app.get("/inbox/:id", async (req, res) => {
 
 app.get("/session", async (_req, res) => {
   const messages = await readOpenSessionMessages();
-  res.json({ messages });
+  // Шаг 61: внутреннее рядом с разговором. Отдельным полем, а не вклейкой в
+  // messages: это не реплики, и клиент, который про них не знает, их не
+  // увидит, а не покажет чужой строкой.
+  const inner = await readInner();
+  res.json({ messages, inner });
 });
 
 app.get("/shelf", async (_req, res) => {

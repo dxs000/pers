@@ -19,6 +19,7 @@ const ACTION = {
   recall: "вспоминал",
   daydream: "задумался",
   reach: "хотел написать",
+  tend: "разбирался в твоём деле",
   rest: "ничего не делал",
 };
 const SOURCE = {
@@ -90,6 +91,45 @@ export default function Life() {
           {a.mood_reason ? ` (${a.mood_reason})` : ""}
         </p>
         <p>{(a.traits || []).join(", ") || "черт пока нет"}</p>
+      </section>
+
+      <section>
+        <h3>Ты для него</h3>
+        {!life.him?.view && !(life.him?.facts || []).length ? (
+          <p className="life-muted">
+            пока никак: взгляд сложится после первого закрытого разговора
+          </p>
+        ) : (
+          <>
+            {life.him.view ? <p>{life.him.view}</p> : null}
+            {(life.him.facts || []).length > 0 && (
+              <ul>
+                {life.him.facts.map((f) => (
+                  <li key={f.id}>
+                    {f.text}
+                    <span className="life-muted"> · с {when(f.noted_at)}{f.hits > 1 ? ` · ×${f.hits}` : ""}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(life.him.threads || []).length > 0 && (
+              <>
+                <p className="life-muted">что у тебя сейчас происходит, как он это понял:</p>
+                <ul>
+                  {life.him.threads.map((t) => (
+                    <li key={t.id}>{t.text}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </>
+        )}
+        {life.him?.talk != null && (
+          <p className="life-muted">
+            тяга говорить первым: {Number(life.him.talk).toFixed(2)}
+            {life.him.talk_why ? ` — ${life.him.talk_why}` : ""}
+          </p>
+        )}
       </section>
 
       <section>

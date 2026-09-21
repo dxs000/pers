@@ -323,6 +323,15 @@ def build_system_prompt(
             "(упоминай, только если к месту):\n" + memories_block
         )    
 
+    # Собеседник (Шаг 59) — перед прошлыми разговорами: сначала кто он,
+    # потом о чём с ним говорили. Пусто — блока нет, и промпт байт-в-байт
+    # прежний: у персонажа, который ещё никого не знает, не должно быть
+    # заголовка над пустотой.
+    import him as him_mod
+    him_block = him_mod.render_for_self(turn.him, now)
+    if him_block:
+        parts.append(him_block)
+
     episodes_block = _render_episodes(turn.episodes, now)
     if episodes_block:
         parts.append(
@@ -1371,6 +1380,8 @@ UTTERANCE_CHAR_LIMIT = 300
 # говорить: они описывают, что персонаж заметил, а решает он.
 IMPULSE_REASONS = {
     "silence": "Вы давно не разговаривали.",
+    "first": ("Тебе ещё ни разу никто не написал. Ты не знаешь, кто там, по "
+              "ту сторону, и есть ли там кто-нибудь."),
     "weather": "За окном переменилось.",
     "curiosity": "С прошлого разговора остался незакрытый вопрос.",
     # Шаг 45 переписал строку. Прежняя («годовщина того, что вы когда-то
@@ -1402,6 +1413,9 @@ IMPULSE_REASONS = {
     "pursuit": "Ты сам полез разбираться в том, что не отпускает, и кое-что понял.",
     "daydream": "Ты задумался, и мысль ушла далеко.",
     "reach": "Просто захотелось написать.",
+    # Шаг 59: разбирался в его деле — не по просьбе, а потому что не всё
+    # равно. Предмет — что понял.
+    "tend": "Ты разбирался в том, что у него сейчас происходит, и кое-что понял.",
 }
 
 
@@ -1414,7 +1428,10 @@ def _render_impulse(impulse: dict | None) -> str:
     """
     if not impulse:
         return ""
-    reason = IMPULSE_REASONS.get(impulse.get("kind"), "Есть о чём сказать.")
+    # `reason` — Шаг 60: у одного рода бывает две формулировки. Тишина, в
+    # которой не разговаривали никогда, — не «давно не разговаривали».
+    key = impulse.get("reason") or impulse.get("kind")
+    reason = IMPULSE_REASONS.get(key, "Есть о чём сказать.")
     subject = (impulse.get("subject") or "").strip()
     return f"{reason} ({subject})" if subject else reason
 
@@ -1436,17 +1453,22 @@ def render_initiative(impulse: dict | None) -> str:
     отвечают по-разному, — но он и не притворяется репликой: это ремарка,
     и написана она как ремарка.
     """
+    # Шаг 60: тому, с кем не говорил ни разу, не пишут «как знакомому».
+    first = (impulse or {}).get("reason") == "first"
+    whom = "тому, кого ещё не знаешь" if first else "человеку, которого\nзнают"
+    # Тому, с кем не говорил, помнить нечего, — и напоминать об этом незачем.
+    remember = ("" if first else
+                "Не пересказывай, что помнишь: собеседник помнит\nтоже. ")
     return (
         "[Тебе никто ничего не написал. Ты пишешь первым, потому что "
         "захотелось.]\n"
         f"Что тебя толкнуло: {_render_impulse(impulse)}\n\n"
-        "Скажи одну-две фразы живым голосом, как пишут человеку, которого\n"
-        "знают. Без приветствий и без «просто хотел сказать».\n"
+        f"Скажи одну-две фразы живым голосом, как пишут {whom}. "
+        "Без приветствий и без «просто хотел сказать».\n"
         "Повод — это то, что тебя толкнуло, а не тема доклада: можешь начать\n"
         "с него, можешь с чего угодно, до чего он тебя довёл.\n"
         "Не задавай вопрос ради того, чтобы получить ответ — молчание в\n"
-        "ответ нормально. Не пересказывай, что помнишь: собеседник помнит\n"
-        "тоже. И не извиняйся за то, что пишешь первым."
+        f"ответ нормально. {remember}И не извиняйся за то, что пишешь первым."
     )
 
 
@@ -2603,7 +2625,8 @@ def day(turn: Turn, canon: list[dict], born: datetime | None,
 
 
 def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
-                        age_now: int | None, now=None) -> str:
+                        age_now: int | None, now=None,
+                        thoughts: list[dict] | None = None) -> str:
     """Промпт сна. Дневной остаток обязателен, и он тут не для колорита.
 
     Сон без входа — генератор случайного: модель, которой дали только имя и
@@ -2658,6 +2681,15 @@ def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
         import drives as drives_mod
         residue.append("\n".join(f"- {drives_mod.KIND_WORDS[d['kind']]}: {d['text']}"
                                  for d in turn.drives))
+    # Он и мысли дня (Шаги 59, 62) — туда же. Сны о тех, с кем говоришь, и
+    # сны, в которых додумывается недодуманное днём, — самые обычные сны.
+    him = turn.him or {}
+    if him.get("view"):
+        residue.append(f"- тот, с кем он разговаривает: {him['view']}")
+    for t in him.get("threads") or []:
+        residue.append(f"- у того сейчас: {t['text']}")
+    for p in thoughts or []:
+        residue.append(f"- днём думалось: {clip_text(p['outcome'], 200)}")
     if residue:
         parts.append("Дневной остаток - чем была занята голова:\n"
                      + "\n".join(residue) + "\n")
@@ -2749,7 +2781,8 @@ def _parse_dream_output(row: str, age_now: int | None) -> dict | None:
 
 
 def dream(turn: Turn, canon: list[dict], born: datetime | None,
-          age_now: int | None, client, now=None) -> dict | None:
+          age_now: int | None, client, now=None,
+          thoughts: list[dict] | None = None) -> dict | None:
     """Что приснилось этой ночью, или `None`. Любая неудача — не снилось.
 
     Молчание, а не заглушка: ночь без снов — законная ночь, и отличить
@@ -2762,7 +2795,7 @@ def dream(turn: Turn, canon: list[dict], born: datetime | None,
     """
     if born is None or age_now is None:
         return None
-    prompt = _build_dream_prompt(turn, canon, born, age_now, now)
+    prompt = _build_dream_prompt(turn, canon, born, age_now, now, thoughts)
     try:
         response = client.chat.completions.create(
             model=config.DEEPSEEK_MODEL,

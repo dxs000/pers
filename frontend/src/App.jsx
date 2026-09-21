@@ -5,11 +5,44 @@ import Life from "./Life";
 const API = import.meta.env.VITE_API_URL;
 const RECONNECT_MS = 3_000;
 
+// Шаг 61: мысли вслух. Внутреннее — не реплики ему, а то, что было с ним,
+// пока никто не смотрел. Слова те же, что у агента (agenda.ACTION_PAST).
+const INNER_ACTION = {
+  read: "читал",
+  write: "писал своё",
+  news: "смотрел новости",
+  explore: "копался",
+  recall: "вспоминал",
+  daydream: "задумался",
+  reach: "захотелось написать",
+  tend: "разбирался в твоём деле",
+};
+const INNER_SOURCE = { dream: "снилось", lived: "было днём", inferred: "вспомнилось" };
+
+function innerLabel(item) {
+  if (item.kind === "pursuit") {
+    const what = INNER_ACTION[item.action] || item.action;
+    return item.about ? `${what} (${item.about})` : what;
+  }
+  return INNER_SOURCE[item.kind] || item.kind;
+}
+
+// Разговор и внутреннее — одной лентой по времени. У только что отправленной
+// реплики метки ещё нет: она последняя по определению.
+function timeline(log, inner, showInner) {
+  const talk = log.map((m, i) => ({ ...m, _k: `t${m.id ?? i}`, _t: m.ts ? Date.parse(m.ts) : Infinity, _o: i }));
+  if (!showInner) return talk;
+  const quiet = inner.map((m, i) => ({ ...m, role: "inner", _k: `i${m.id}`, _t: Date.parse(m.ts), _o: i }));
+  return [...talk, ...quiet].sort((a, b) => a._t - b._t || a._o - b._o);
+}
+
 export default function App() {
   const [text, setText] = useState("");
   const [inboxId, setInboxId] = useState(null);
   const [status, setStatus] = useState(null);
   const [log, setLog] = useState([]);
+  const [inner, setInner] = useState([]);
+  const [showInner, setShowInner] = useState(true);
   const [live, setLive] = useState(false);
   const [shelf, setShelf] = useState(null);
   const [convert, setConvert] = useState(null);
@@ -25,6 +58,7 @@ export default function App() {
     const res = await fetch(`${API}/session`);
     const data = await res.json();
     setLog(data.messages ?? []);
+    setInner(data.inner ?? []);
   }
 
   async function loadShelf() {
@@ -41,7 +75,13 @@ export default function App() {
     loadSession();
     loadShelf();
     const timer = setInterval(loadShelf, 20_000);
-    return () => clearInterval(timer);
+    // Внутреннее приходит и без реплик: демон шлёт reply_ready и после сна,
+    // дня и дел, но канал может быть тих — тогда раз в минуту перечитываем.
+    const inner = setInterval(loadSession, 60_000);
+    return () => {
+      clearInterval(timer);
+      clearInterval(inner);
+    };
   }, []);
 
   useEffect(() => {
@@ -191,6 +231,14 @@ export default function App() {
               лог
             </button>
           </nav>
+          <label className="inner-toggle">
+            <input
+              type="checkbox"
+              checked={showInner}
+              onChange={(e) => setShowInner(e.target.checked)}
+            />
+            мысли вслух
+          </label>
           <span className={live ? "live on" : "live"}>
             {live ? "канал жив" : "канал тих"}
           </span>
@@ -237,7 +285,7 @@ export default function App() {
 
       {tab === "talk" ? (
       <main className="stage">
-        {log.length === 0 ? (
+        {timeline(log, inner, showInner).length === 0 ? (
           <div className="empty">
             <h2>Можно молчать</h2>
             <p>
@@ -247,11 +295,18 @@ export default function App() {
           </div>
         ) : (
           <div className="log">
-            {log.map((item, i) => (
-              <p key={item.id ?? i} className={item.role}>
-                {item.text}
-              </p>
-            ))}
+            {timeline(log, inner, showInner).map((item) =>
+              item.role === "inner" ? (
+                <p key={item._k} className="inner">
+                  <span className="inner-label">{innerLabel(item)}</span>
+                  {item.text ? ` — ${item.text}` : ""}
+                </p>
+              ) : (
+                <p key={item._k} className={item.role}>
+                  {item.text}
+                </p>
+              )
+            )}
           </div>
         )}
       </main>

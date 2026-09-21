@@ -203,6 +203,29 @@ def _snapshot_drives(conn, now) -> list[dict]:
             for d in store_character.open_drives(conn, now, DRIVES_SNAPSHOT_LIMIT)]
 
 
+def _snapshot_him(conn) -> dict | None:
+    """Собеседник для снимка (Шаг 59). `None`, если о нём нечего сказать.
+
+    Знакомство само по себе блок не заводит: «вы знакомы с января» без
+    единого слова о человеке — это счётчик, а не знание. Оно едет только
+    приложением к взгляду, фактам или его делам.
+    """
+    import store_him
+    seen = store_him.view(conn)
+    facts = store_him.open_facts(conn, store_him.FACTS_SNAPSHOT_LIMIT)
+    threads = open_threads(conn, "user", THREADS_SNAPSHOT_LIMIT)
+    if not (seen["view"] or facts or threads):
+        return None
+    met = store_him.acquaintance(conn)
+    return {
+        "view": seen["view"],
+        "facts": [f["text"] for f in facts],
+        "threads": [{"id": t["id"], "text": t["text"]} for t in threads],
+        "since": iso(met["since"]),
+        "talks": met["talks"],
+    }
+
+
 def build_snapshot(conn, now, limit: int = 7, about=None) -> Turn:
     """Снимок хода из базы. Та же форма, что у `store.build_snapshot`.
 
@@ -310,6 +333,7 @@ def build_snapshot(conn, now, limit: int = 7, about=None) -> Turn:
         threads=open_threads(conn, "self", THREADS_SNAPSHOT_LIMIT),
         reading=current_reading(conn),
         drives=_snapshot_drives(conn, now),
+        him=_snapshot_him(conn),
         episodes=[
             {
                 "id": f"ep_{e['id']}",
@@ -1170,7 +1194,8 @@ def _fill_fixture(conn, state: dict) -> None:
                place_label=%s, place_lat=%s, place_lon=%s, outside_latch=%s,
                last_exchange_ts=%s, last_search_ts=NULL, traits_at=%s,
                mood_reason=%s, mood_since=%s, day_at=NULL, read_at=NULL,
-               essay_at=NULL, news_at=NULL, drives_at=NULL, agenda_at=NULL
+               essay_at=NULL, news_at=NULL, drives_at=NULL, agenda_at=NULL,
+               him_view=NULL, him_at=NULL, talk=NULL, talk_why=NULL, talk_at=NULL
          WHERE id = 1
         """,
         (
@@ -1813,7 +1838,7 @@ def mark_spoken(conn, impulse_id: int, now) -> None:
                  (now, impulse_id))
 
 
-def damp_impulses(conn, factor: float) -> None:
+def damp_impulses(conn, factor: float, kinds=None) -> None:
     """Приглушить все несказанные поводы.
 
     Зовётся после ЛЮБОЙ сказанной реплики, а не только после той, что выросла
@@ -1823,9 +1848,21 @@ def damp_impulses(conn, factor: float) -> None:
     Гасится всё, потому что человек услышал ОДНУ реплику, а не реплику про
     погоду.
     """
+    # Шаг 60: с `kinds` гасится только названное. Приглушать всё подряд
+    # значило, что одно замечание о погоде хоронит и сон, и мысль, и желание
+    # написать: 1.5 × 0.3 = 0.45, ниже порога, и повод тихо протухал. Человек
+    # услышал реплику про погоду — и про погоду ему второй раз не надо; но
+    # про сон он ещё не слышал ничего.
+    if kinds is None:
+        conn.execute(
+            "UPDATE impulses SET urge = urge * %s WHERE spoken_at IS NULL",
+            (factor,),
+        )
+        return
     conn.execute(
-        "UPDATE impulses SET urge = urge * %s WHERE spoken_at IS NULL",
-        (factor,),
+        "UPDATE impulses SET urge = urge * %s "
+        "WHERE spoken_at IS NULL AND kind = ANY(%s)",
+        (factor, list(kinds)),
     )
 
 

@@ -191,6 +191,7 @@ session_stale(+4ч) = True
   ],
   "reading": null,
   "drives": [],
+  "him": null,
   "episodes": [
     {
       "id": "ep_1",

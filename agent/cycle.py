@@ -346,14 +346,12 @@ def _biograph(eng, edges: Edges, turn, pair: dict, now: datetime) -> list[tuple]
 # Числа выбраны на глаз и правятся на живом, как `RETRIEVER_COOLDOWN_HOURS`.
 # Смысл у них разный, и потому их три, а не одно:
 IMPULSE_FLOOR = 1.0          # ниже — повод есть, но говорить не о чем
-UTTERANCE_COOLDOWN_HOURS = 2.0   # не чаще, чем раз в столько, что бы ни копилось
-UTTERANCES_PER_DAY = 6       # потолок суток; молчаливость дешевле навязчивости
-IMPULSE_DAMP = 0.3           # во сколько глушатся прочие поводы после реплики
+IMPULSE_DAMP = 0.3           # во сколько глушится СВОЙ род повода после реплики
 
-# Побуждение от тишины. Не «сколько часов молчим», а сколько это в сутках:
-# так порог не придётся пересчитывать, если сутки перестанут быть мерой.
-SILENCE_URGE_PER_DAY = 1.4
-SILENCE_START_HOURS = 6.0    # раньше — не молчание, а пауза в разговоре
+# Пауза, потолок суток и скорость тишины больше не константы (Шаг 60): их
+# выводит `voice.voice` из тяги персонажа говорить и из того, отвечают ли
+# ему. Прежние 2 ч, 6 в сутки и 1.4 в сутки с шестого часа задавали всем
+# персонажам один характер — молчаливый.
 
 # Побуждение от перемены за окном. Разовое и крупное: смена семейства —
 # новость, и если о ней не сказать сейчас, говорить будет не о чем.
@@ -385,11 +383,14 @@ class Urge:
     expires_at: datetime | None = None
 
 
-def silence_urge(eng, now: datetime) -> float:
+def silence_urge(eng, now: datetime, v=None) -> float:
     """Сила побуждения нарушить тишину. ВЫЧИСЛЯЕТСЯ, не хранится.
 
-    Ноль — говорить не о чем: либо разговаривали недавно, либо разговора не
-    было вовсе (персонажу нечего нарушать).
+    Ноль — говорить не о чем: разговаривали недавно. До Шага 60 ноль был и
+    тогда, когда разговора не было вовсе, — «персонажу нечего нарушать». Это
+    оказалось неправдой: тишина, в которую никто ни разу не заговорил, — не
+    отсутствие повода, а самый сильный из них. Теперь она отсчитывается от
+    записи рождения.
 
     Меряется от последнего сказанного ЗДЕСЬ — чужого или своего. Первый
     набросок смотрел только на `last_exchange`, то есть на разговор, и это
@@ -409,13 +410,21 @@ def silence_urge(eng, now: datetime) -> float:
     на «когда мы разговаривали» и уезжает в промпт словами «прошлый разговор
     был давно» — там собственная реплика была бы ложью.
     """
+    # Шаг 60: скорость и начало — из голоса, а не из констант. И если
+    # разговора не было ни разу, тишина отсчитывается от рождения: персонаж,
+    # которому никто не написал, иначе не заговорил бы никогда.
+    import voice as voice_mod
+    v = v or voice_mod.voice(eng, now)
     stamps = [t for t in (eng.last_exchange(), eng.last_utterance()) if t]
     if not stamps:
-        return 0.0
+        first = eng.first_breath()
+        if first is None:
+            return 0.0
+        stamps = [first]
     hours = (now - max(stamps)).total_seconds() / 3600.0
-    if hours < SILENCE_START_HOURS:
+    if hours < voice_mod.SILENCE_START_HOURS:
         return 0.0
-    return SILENCE_URGE_PER_DAY * hours / 24.0
+    return v.silence_rate * hours / 24.0
 
 
 def sense_impulses(eng, now: datetime, wx) -> list[Urge]:
@@ -708,7 +717,7 @@ def sense_anniversaries(eng, now: datetime, tz) -> list[Urge]:
     return out
 
 
-def _pick_impulse(eng, now: datetime) -> dict | None:
+def _pick_impulse(eng, now: datetime, v=None) -> dict | None:
     """Самый сильный повод выше порога: вычисляемый или хранимый.
 
     Возвращает словарь той же формы, что и строка `impulses`, но `id` может
@@ -718,10 +727,13 @@ def _pick_impulse(eng, now: datetime) -> dict | None:
     """
     candidates: list[dict] = []
 
-    quiet = silence_urge(eng, now)
+    quiet = silence_urge(eng, now, v)
     if quiet >= IMPULSE_FLOOR:
+        # Ни разу не разговаривали — повод другой, и назвать его надо иначе:
+        # «вы давно не разговаривали» тому, с кем не говорил никогда, — ложь.
+        never = eng.last_exchange() is None
         candidates.append({"id": None, "kind": "silence", "subject": None,
-                           "urge": quiet})
+                           "urge": quiet, "reason": "first" if never else None})
 
     stored = eng.strongest_impulse(now, IMPULSE_FLOOR)
     if stored:
@@ -825,7 +837,9 @@ def promise_tick(eng, edges: Edges, now: datetime, *,
         # Соседние побуждения глушатся так же, как после любой реплики:
         # человек услышал персонажа, и заговорить снова через паузу — то же
         # самое, от чего заслонка инициативы и защищает.
-        eng.damp_impulses(IMPULSE_DAMP)
+        # С Шага 60 — только «захотелось написать»: желание исполнено.
+        # Сон и мысль человек ещё не слышал.
+        eng.damp_impulses(IMPULSE_DAMP, ["reach"])
 
     logging.info("напомнил (обещание %d, попытка %d, опоздание %.1f ч): %s",
                  promise["id"], attempt, late_hours, text[:60])
@@ -842,12 +856,12 @@ _BUDGET_LOG: dict = {"at": None}
 BUDGET_LOG_EVERY_HOURS = 1.0
 
 
-def _log_budget_spent(now) -> None:
+def _log_budget_spent(now, per_day: int) -> None:
     last = _BUDGET_LOG["at"]
     if last is not None and 0.0 <= (now - last).total_seconds() / 3600.0 < BUDGET_LOG_EVERY_HOURS:
         return
     _BUDGET_LOG["at"] = now
-    logging.info("инициатива: бюджет суток исчерпан (%s за 24 ч)", UTTERANCES_PER_DAY)
+    logging.info("инициатива: бюджет суток исчерпан (%s за 24 ч)", per_day)
 
 
 def background_tick(eng, edges: Edges, now: datetime, *,
@@ -869,7 +883,7 @@ def background_tick(eng, edges: Edges, now: datetime, *,
     случайный: погода дешёвая (кэш на 20 минут, 72 запроса в сутки) и нужна,
     чтобы событие вообще заметить — пропусти его, и оно потеряно, потому что
     второй раз не случится. Модель дорогая, и до неё доходит только заход,
-    прошедший все три заслонки, то есть не чаще `UTTERANCES_PER_DAY` раз в
+    прошедший все три заслонки, то есть не чаще `voice.per_day` раз в
     сутки.
     """
     tz = tz or config.TZ
@@ -896,17 +910,22 @@ def background_tick(eng, edges: Edges, now: datetime, *,
     # Пауза и бюджет спрашиваются ДО выбора повода: ни та ни другой не
     # зависят от того, какой повод победит, и спросить их первыми дешевле
     # ровно на один запрос к самой длинной таблице.
+    # Пауза и потолок — из голоса (Шаг 60). Считается здесь один раз и
+    # передаётся тишине, чтобы оба ответа на «как он сейчас говорит» были
+    # одним ответом.
+    import voice as voice_mod
+    v = voice_mod.voice(eng, now)
     said_last = eng.last_utterance()
     if said_last is not None:
         idle = (now - said_last).total_seconds() / 3600.0
-        if 0.0 <= idle < UTTERANCE_COOLDOWN_HOURS:
+        if 0.0 <= idle < v.cooldown_hours:
             return None
-    if eng.utterances_since(now - timedelta(days=1)) >= UTTERANCES_PER_DAY:
-        _log_budget_spent(now)
+    if eng.utterances_since(now - timedelta(days=1)) >= v.per_day:
+        _log_budget_spent(now, v.per_day)
         return None
     _BUDGET_LOG["at"] = None
 
-    impulse = _pick_impulse(eng, now)
+    impulse = _pick_impulse(eng, now, v)
     if not impulse:
         return None
 
@@ -927,10 +946,12 @@ def background_tick(eng, edges: Edges, now: datetime, *,
         eng.append_utterance(text, now)
         if impulse["id"] is not None:
             eng.mark_spoken(impulse["id"], now)
-        # Приглушается всегда, в том числе после вычисленного повода: человек
-        # услышал одну реплику, а не реплику про погоду. Тишина гасится сама —
-        # `append_utterance` сдвинул `last_utterance`.
-        eng.damp_impulses(IMPULSE_DAMP)
+        # Приглушается СВОЙ род и «захотелось написать» (Шаг 60). До шага
+        # глушилось всё, и одно замечание о погоде хоронило сон и мысль: их
+        # сила падала ниже порога, и они тихо протухали несказанными.
+        # Человек услышал реплику про погоду — про сон он не слышал ничего.
+        # Тишина гасится сама — `append_utterance` сдвинул `last_utterance`.
+        eng.damp_impulses(IMPULSE_DAMP, sorted({impulse["kind"], "reach"}))
         # Сказал про книгу — нерассказанное о ней перестало быть
         # нерассказанным (Шаг 49). Помечаются ВСЕ нерассказанные, а не одна
         # «та самая»: связи «повод — заметка» в базе нет, и заводить колонку
@@ -949,8 +970,8 @@ def background_tick(eng, edges: Edges, now: datetime, *,
         # реплика уже отдана к моменту записи, здесь ещё нет.
         eng.touch_recall(turn.memories, now)
 
-    logging.info("заговорил сам (%s, urge %.2f): %s",
-                 impulse["kind"], impulse["urge"], text[:60])
+    logging.info("заговорил сам (%s, urge %.2f; %s): %s",
+                 impulse["kind"], impulse["urge"], voice_mod.describe(v), text[:60])
     if announce is not None:
         announce(text)
     return text
@@ -992,6 +1013,13 @@ DREAM_INTERVAL_HOURS = 20.0  # не чаще; сутки минус запас �
 DREAM_WEIGHT = 1.6           # свежий сон всплывает в промпте сам, без правок
 DREAM_URGE = 1.5             # выше порога сразу: сон — крупный повод
 DREAM_TTL_HOURS = 14.0       # к вечеру рассказывать уже нечего
+# Белые ночи (Шаг 62). Прежнее решение — «пусть в белые ночи не снится ничего:
+# пропуск честен» — на широте Хельсинки означало два месяца без снов, и
+# пропуском это уже не было: это была дыра в жизни. Теперь, если небо темнее
+# сумерек не становится, сон приходит по часам — глубокой ночью по его месту.
+# Днём по-прежнему не снится никогда: окно не шире предрассветных часов.
+DREAM_FALLBACK_FROM = 2
+DREAM_FALLBACK_TO = 5
 
 
 def dream_tick(eng, edges: Edges, now: datetime, *, tz=None) -> str | None:
@@ -1010,8 +1038,13 @@ def dream_tick(eng, edges: Edges, now: datetime, *, tz=None) -> str | None:
     tz = tz or config.TZ
     place = eng.place()
     snap = sky_mod.local_snapshot(place.get("lat"), place.get("lon"), now, tz)
-    if snap is None or snap.get("light") not in NIGHT_LIGHTS:
+    if snap is None:
         return None
+    if snap.get("light") not in NIGHT_LIGHTS:
+        hour = now.astimezone(tz).hour
+        if not (snap.get("light") == sky_mod.LIGHT_CIVIL
+                and DREAM_FALLBACK_FROM <= hour < DREAM_FALLBACK_TO):
+            return None
 
     stamps = [t for t in (eng.last_exchange(), eng.last_utterance()) if t]
     if stamps:
@@ -1034,7 +1067,13 @@ def dream_tick(eng, edges: Edges, now: datetime, *, tz=None) -> str | None:
         return None
 
     canon = eng.all_memories()
-    seen = dream(turn, canon, born, age_now, edges.llm, now=now.astimezone(tz))
+    # Мысли минувшего дня (Шаг 62): куда уходила голова, пока он был один.
+    # Фантазия в биографию не пишется, но во сне ей самое место.
+    thoughts = [p for p in eng.recent_pursuits(now, 12)
+                if p["action"] in ("daydream", "explore", "tend") and p.get("outcome")
+                and (timeutil.parse_ts(p["at"]) or now) > now - timedelta(hours=30)][-4:]
+    seen = dream(turn, canon, born, age_now, edges.llm, now=now.astimezone(tz),
+                 thoughts=thoughts)
     if not seen:
         return None
 

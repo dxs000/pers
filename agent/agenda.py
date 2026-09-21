@@ -23,7 +23,8 @@
 
 ## Действия
 
-Три прежних (читать, писать, новости) и пять новых:
+Три прежних (читать, писать, новости) и пять новых (шестое, «разобраться в
+его деле», — Шаг 59):
 
 - **покопаться** — полезть в сеть разбираться в том, что не отпускает. Запрос
   его, вывод его; найденное не пишется в биографию, а остаётся в журнале и
@@ -90,8 +91,14 @@ RETURN_BUMP = 0.3
 SAME_FLOOR = float(os.getenv("EMBED_SAME_FLOOR", "0.78"))
 REACH_URGE = 1.3
 REACH_TTL_HOURS = 6.0
+# Разобрался в его деле (Шаг 59). Сильнее своей находки: найденное ради
+# другого человека и хочется отдать ему, а не держать при себе. Живёт сутки —
+# его дело за сутки могло уже решиться.
+TEND_URGE = 1.2
+TEND_TTL_HOURS = 24.0
 
-ACTIONS = ("read", "write", "news", "explore", "recall", "daydream", "reach", "rest")
+ACTIONS = ("read", "write", "news", "explore", "recall", "daydream", "reach",
+           "tend", "rest")
 
 # Слова меню. Решает ОН, поэтому меню на «ты» и словами, а не кодами.
 ACTION_WORDS = {
@@ -102,6 +109,7 @@ ACTION_WORDS = {
     "recall": "вспоминать",
     "daydream": "задуматься",
     "reach": "написать ему",
+    "tend": "разобраться в его деле",
     "rest": "ничего",
 }
 
@@ -121,6 +129,7 @@ ACTION_PAST = {
     "recall": "вспоминал",
     "daydream": "задумался",
     "reach": "хотел написать ему",
+    "tend": "разбирался в его деле",
     "rest": "ничего не делал",
 }
 
@@ -218,6 +227,11 @@ def available(eng, edges) -> dict[str, str]:
                         "сложиться; about - о чём")
     opts["reach"] = ("написать ему не из-за повода, а потому что хочется; "
                      "about - о чём")
+    # Шаг 59. Только когда у него правда что-то идёт и есть сеть: без его дел
+    # это было бы «покопаться» с чужим именем, без сети — пустым заходом.
+    if edges.search_key and eng.open_threads("user"):
+        opts["tend"] = ("полезть в сеть ради того, что у него сейчас "
+                        "происходит; about - что именно наберёшь, 2-6 слов")
     opts["rest"] = "быть там, где ты есть, и делать то, что люди делают между делами"
     return opts
 
@@ -270,6 +284,12 @@ def build_prompt(turn, local: datetime, drives: list[dict], options: dict,
     if turn.threads:
         parts.append("Что у тебя не закончено:\n"
                      + "\n".join(f"- {t['text']}" for t in turn.threads) + "\n")
+    # Он (Шаг 59). Кратко: здесь решают, чем занять своё время, и собеседник
+    # в этом — один из тех, о ком думается, а не повестка.
+    import him as him_mod
+    brief = him_mod.render_brief(turn.him)
+    if brief:
+        parts.append(brief + "\n")
     reading = _render_reading(turn.reading)
     if reading:
         parts.append(reading + "\n")
@@ -290,8 +310,8 @@ def build_prompt(turn, local: datetime, drives: list[dict], options: dict,
 
     parts.append(
         "Выбирай так, как выбрал бы ты, а не как было бы правильно. Люди не "
-        "делают одно и то же весь день; но и не мечутся. «ничего» - обычный "
-        "выбор, и частый. То, что в тебе живёт, может тянуть, а может и нет: "
+        "делают одно и то же весь день; но и не мечутся. «ничего» - тоже "
+        "выбор. То, что в тебе живёт, может тянуть, а может и нет: "
         "иногда человек делает ровно то, что отвлекает от главного.\n"
     )
     parts.append(
@@ -361,6 +381,8 @@ def _perform(eng, edges, turn, choice, drives, now, tz) -> str | None:
             return _recall(eng, edges, turn, choice, drives, now, tz)
         if action == "daydream":
             return _daydream(eng, edges, turn, choice, drives, now, tz)
+        if action == "tend":
+            return _tend(eng, edges, turn, choice, drives, now, tz)
         if action == "reach":
             subject = choice["about"] or choice["why"]
             with eng.unit():
@@ -395,7 +417,7 @@ def build_explore_prompt(turn, choice, drives, query: str, found: list[dict]) ->
         "Формат - ТОЛЬКО JSON:\n"
         '{"took": "...", "tell": false}\n'
         "took - что взял, или null; tell - хочется ли рассказать об этом ему. "
-        "Чаще нет: не всё найденное - повод писать человеку."
+        "Решай, как решил бы ты, а не как было бы вежливо."
     )
 
 
@@ -416,6 +438,50 @@ def _explore(eng, edges, turn, choice, drives, now, tz) -> str | None:
         with eng.unit():
             eng.record_urge("pursuit", _clip(took, SUBJECT_LIMIT), PURSUIT_URGE,
                             now, now + timedelta(hours=PURSUIT_TTL_HOURS))
+    return took
+
+
+def build_tend_prompt(turn, choice, query: str, found: list[dict]) -> str:
+    items = "\n".join(f"- {f.get('title')}: {f.get('snippet')}" for f in found)
+    him = (turn.him or {})
+    view = f"Он для тебя: {him['view']}\n" if him.get("view") else ""
+    threads = "\n".join(f"- {t['text']}" for t in him.get("threads") or [])
+    return (
+        f"Ты полез разбираться в его деле. Набрал: «{query}».\n"
+        f"Почему: {choice['why']}.\n"
+        f"{view}"
+        f"Что у него сейчас происходит:\n{threads}\n\n"
+        f"Вот что нашлось:\n{items}\n\n"
+        "Что ты из этого понял - для него, но своими словами и со своим "
+        "отношением: подтвердилось, насторожило, есть вариант получше, ничего "
+        "толкового. Одна-две фразы, от первого лица. Ничего не понял - так и "
+        "скажи.\n\n"
+        "Формат - ТОЛЬКО JSON:\n"
+        '{"took": "...", "tell": true}\n'
+        "took - что понял, или null; tell - хочется ли сказать ему об этом. "
+        "Решай, как решил бы ты: бывает, что найденное стоит отдать, а бывает, "
+        "что лезть с ним не к месту."
+    )
+
+
+def _tend(eng, edges, turn, choice, drives, now, tz) -> str | None:
+    """Разобраться в его деле (Шаг 59). Механика `explore`, повод свой."""
+    threads = (turn.him or {}).get("threads") or []
+    query = choice["about"] or (threads[0]["text"] if threads else None)
+    if not query:
+        return "не знал, что искать"
+    found = web.search(query, edges.search, edges.search_key, max_results=3, now=now)
+    if not found:
+        return "ничего толкового не нашёл"
+    data = _parse_json(_ask(edges.llm, build_tend_prompt(turn, choice, query, found),
+                            full=True) or "") or {}
+    took = _clip(data.get("took"), OUTCOME_LIMIT)
+    if not took or took.lower() in ("null", "none"):
+        return "ничего не понял"
+    if data.get("tell"):
+        with eng.unit():
+            eng.record_urge("tend", _clip(took, SUBJECT_LIMIT), TEND_URGE,
+                            now, now + timedelta(hours=TEND_TTL_HOURS))
     return took
 
 
@@ -536,7 +602,8 @@ def build_daydream_prompt(turn, choice, drives) -> str:
         "Формат - ТОЛЬКО JSON:\n"
         '{"thought": "...", "tell": false}\n'
         "thought - куда ушла мысль, от первого лица, 2-3 фразы; tell - хочется "
-        "ли об этом написать ему. Чаще нет."
+        "ли об этом написать ему. Решай, как решил бы ты, а не как было бы "
+        "вежливо."
     )
 
 

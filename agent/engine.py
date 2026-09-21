@@ -274,6 +274,56 @@ class PgEngine:
         import store_agenda
         store_agenda.set_agenda_at(self.conn, now)
 
+    # --- Собеседник (Шаг 59) и голос (Шаг 60) --------------------------------
+    # Модулем рядом, как `store_character`: вся работа с ним — в `store_him`.
+    def him_facts(self, limit: int | None = None) -> list[dict]:
+        import store_him
+        return store_him.open_facts(self.conn, limit)
+
+    def all_him_facts(self) -> list[dict]:
+        import store_him
+        return store_him.all_facts(self.conn)
+
+    def add_him_fact(self, text: str, now: datetime) -> int:
+        import store_him
+        return store_him.add_fact(self.conn, text, now)
+
+    def touch_him_facts(self, ids, now: datetime) -> int:
+        import store_him
+        return store_him.touch_facts(self.conn, ids, now)
+
+    def drop_him_facts(self, items, now: datetime) -> int:
+        import store_him
+        return store_him.drop_facts(self.conn, items, now)
+
+    def him_view(self) -> dict:
+        import store_him
+        return store_him.view(self.conn)
+
+    def set_him_view(self, text, now: datetime) -> None:
+        import store_him
+        store_him.set_view(self.conn, text, now)
+
+    def acquaintance(self) -> dict:
+        import store_him
+        return store_him.acquaintance(self.conn)
+
+    def reply_stats(self, now: datetime, window_hours: float, sample: int) -> dict:
+        import store_him
+        return store_him.reply_stats(self.conn, now, window_hours, sample)
+
+    def talk(self) -> dict:
+        import store_him
+        return store_him.talk(self.conn)
+
+    def set_talk(self, value, why, now: datetime) -> None:
+        import store_him
+        store_him.set_talk(self.conn, value, why, now)
+
+    def first_breath(self):
+        import store_him
+        return store_him.first_breath(self.conn)
+
     def record_birth(self, name: str, born_at, birthplace: str | None,
                      reason: str) -> bool:
         return self._pg.record_birth(self.conn, name, born_at, birthplace, reason)
@@ -375,8 +425,10 @@ class PgEngine:
     def mark_spoken(self, impulse_id: int, now: datetime) -> None:
         self._pg.mark_spoken(self.conn, impulse_id, now)
 
-    def damp_impulses(self, factor: float) -> None:
-        self._pg.damp_impulses(self.conn, factor)
+    def damp_impulses(self, factor: float, kinds=None) -> None:
+        # `kinds` — Шаг 60: гасится своё, а не всё подряд. `None` — всё, как
+        # было до шага; так зовут только те, кому это и нужно.
+        self._pg.damp_impulses(self.conn, factor, kinds)
 
     def open_impulses(self) -> list[dict]:
         return self._pg.open_impulses(self.conn)

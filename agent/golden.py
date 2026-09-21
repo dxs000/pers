@@ -865,7 +865,13 @@ _PROMISES = {"promises": None}
 # собой. Подробности — у `_run_reading`.
 _READING = {"reading": None}
 
-SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
+# Восемнадцатое и девятнадцатое семейства (Шаги 59–60): собеседник и голос.
+# Отдельно от инициативы: та проверяет, КОГДА повод срабатывает, эти — ОТКУДА
+# персонаж знает, кому говорит, и КАК ЧАСТО ему позволяет говорить отклик.
+_HIM = {"him": None}
+_VOICE = {"voice": None}
+
+SCENARIOS = {**_HIM, **_VOICE, **_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
              **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_NEWS, **_DRIVES, **_AGENDA, **_EMBED, **_PARSE, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
              **_READING, **_BIRTH, **_INSPECT, **_HTTP, **_GENESIS}
 
@@ -1363,11 +1369,12 @@ def _run_inbox() -> str:
 # Моменты выбраны под пороги, а не под правдоподобие. Фикстур договорил за
 # 0.2 ч до NOW_REF, значит:
 #
-#   +30:00  тихо 30.2 ч -> сила 1.76 при пороге 1.0. Говорит.
-#   +30:10  через десять минут — пауза UTTERANCE_COOLDOWN_HOURS (2 ч). Молчит.
+#   +30:00  тихо 30.2 ч -> сила по голосу (Шаг 60) выше порога 1.0. Говорит.
+#   +30:10  через десять минут — пауза голоса. Молчит.
 #   +34:00  пауза вышла, но тишина отсчитывается ЗАНОВО от собственной
-#           реплики: 4 ч -> ниже SILENCE_START_HOURS (6 ч), повода нет.
-#           Молчит — и это главное, что держит сценарий.
+#           реплики: 4 ч -> сила ниже порога, повода нет. Погода с Шага 60
+#           после реплики о тишине НЕ приглушена (глушится свой род), но к
+#           этому часу протухла. Молчит — и это главное, что держит сценарий.
 #
 # Третий заход и есть проверка на навязчивость. Без него правка «мерить
 # тишину от последнего сказанного ЗДЕСЬ» осталась бы непокрытой, а без самой
@@ -2594,7 +2601,10 @@ def _run_promises() -> str:
     # бы не то, что заявлено.
     with eng.unit():
         eng.record_urge("dream", "станция без названия", 2.0, PROMISE_ASKED)
-        for i in range(cycle.UTTERANCES_PER_DAY):
+        # Потолок голоса зависит от отклика (Шаг 60); выбирается досуха его
+        # верхним краем — тогда бюджет исчерпан при любом отклике.
+        import voice as voice_mod
+        for i in range(voice_mod.PER_DAY_MAX):
             eng.append_utterance(f"фоновая реплика {i + 1}",
                                  PROMISE_DUE - timedelta(hours=6, minutes=i))
     budget = eng.utterances_since(PROMISE_ON_TIME - timedelta(days=1))
@@ -2633,7 +2643,7 @@ def _run_promises() -> str:
         f"обмен 1 (прямая просьба):      {noticed[0]!r}\n"
         f"обмен 2 (время без просьбы):   {noticed[1]!r}\n"
         f"{'=' * 60}\n"
-        f"реплик за сутки: {budget} при потолке {cycle.UTTERANCES_PER_DAY}\n"
+        f"реплик за сутки: {budget} при потолке не выше {voice_mod.PER_DAY_MAX}\n"
         f"фоновый заход (повод силой 2.0 при пороге {cycle.IMPULSE_FLOOR}): "
         f"сказал = {muted is not None}\n"
         f"заход по обещанию при том же бюджете: сказал = {on_time is not None}\n"
@@ -3133,6 +3143,8 @@ def _run_initiative() -> str:
     # обнуляет. Артефакт при этом выглядел исправным: ноль там правда,
     # только отвечает он на другой вопрос.
     sensed = cycle.sense_impulses(eng, INIT_NOW, _WEATHER_RAIN)
+    import voice as voice_mod
+    v_before = voice_mod.voice(eng, INIT_NOW)
     quiet = cycle.silence_urge(eng, INIT_NOW)
 
     said = cycle.background_tick(
@@ -3143,6 +3155,8 @@ def _run_initiative() -> str:
     after_first = _dump_impulses(eng)
 
     soon = cycle.background_tick(eng, edges, INIT_SOON, tz=TZ)
+    v_later = voice_mod.voice(eng, INIT_LATER)
+    quiet_later = cycle.silence_urge(eng, INIT_LATER)
     later = cycle.background_tick(eng, edges, INIT_LATER, tz=TZ)
 
     messages = llm.seen[0] if llm.seen else []
@@ -3154,12 +3168,14 @@ def _run_initiative() -> str:
         f"СОБЫТИЯ на {iso(INIT_NOW)}:\n{_render_urges(sensed)}\n"
         f"ТИШИНА (вычисляется, не хранится): {quiet:.2f} при пороге "
         f"{cycle.IMPULSE_FLOOR}\n"
+        f"ГОЛОС до:    {voice_mod.describe(v_before)}\n"
+        f"ГОЛОС через 4 ч: {voice_mod.describe(v_later)}\n"
         f"{'=' * 60}\n"
         f"заход 1 (+30ч, тихо 30.2ч):  сказал = {said is not None}\n"
         f"заход 2 (+10 мин):           сказал = {soon is not None}   "
-        f"(пауза {cycle.UTTERANCE_COOLDOWN_HOURS} ч)\n"
+        f"(пауза {v_before.cooldown_hours:.2f} ч)\n"
         f"заход 3 (+4ч от первого):    сказал = {later is not None}   "
-        f"(тихо 4 ч — меньше {cycle.SILENCE_START_HOURS} ч)\n"
+        f"(тишина {quiet_later:.2f} — ниже порога)\n"
         f"{'=' * 60}\n"
         f"{after_first}\n"
         f"{'=' * 60}\n"
@@ -3172,6 +3188,216 @@ def _run_initiative() -> str:
         f"{json.dumps(eng.working_memory(), ensure_ascii=False, indent=2)}\n"
         f"{'=' * 60}\n"
         f"{_build_summarizer_prompt(eng.snapshot(INIT_LATER), eng.summary_buffer())}"
+    )
+
+
+# --- Сценарий СОБЕСЕДНИКА (Шаг 59) -------------------------------------------
+# Два разговора подряд. Первый знакомит: факты, его дела, взгляд, момент в
+# биографию. Второй проверяет всё, чем знание о человеке отличается от
+# накопления: подтверждённое трогается, неправда закрывается с причиной, дело
+# кончается, номер, которого не показывали, отбрасывается, а «взгляд не
+# изменился» не стирает прежний.
+HIM_FIRST = NOW + timedelta(hours=4)
+HIM_SECOND = NOW + timedelta(days=3)
+
+_HIM_TALK_1 = [
+    {"role": "user", "text": "Слушай, я третью неделю выбираю ноутбук и уже ненавижу это занятие."},
+    {"role": "assistant", "text": "А для чего он тебе? Под игры или под работу?"},
+    {"role": "user", "text": "Под работу. Я пишу бэкенд, а по вечерам свою штуку про погоду. Дочь ещё просит порисовать на нём."},
+    {"role": "assistant", "text": "Тогда экран важнее видеокарты. Сколько лет дочке?"},
+    {"role": "user", "text": "Семь. И да, в пятницу у меня собеседование, так что ноутбук надо до пятницы."},
+]
+_HIM_TALK_2 = [
+    {"role": "assistant", "spontaneous": True, "text": "Ну что, собеседование было?"},
+    {"role": "user", "text": "Было. Взяли! Ноутбук уже не нужен, дадут рабочий."},
+    {"role": "assistant", "text": "Поздравляю. А своя штука про погоду?"},
+    {"role": "user", "text": "Её бросать не буду. Кстати, я не бэкенд теперь, буду тимлидом."},
+]
+
+_HIM_SCRIPT = [
+    ("он", json.dumps({
+        "facts": ["пишет бэкенд, по вечерам - свою штуку про погоду",
+                  "у него дочь, семь лет, любит рисовать",
+                  "  ", "пишет бэкенд, по вечерам - свою штуку про погоду"],
+        "confirmed": [], "dropped": [],
+        "opened": ["третью неделю выбирает ноутбук и злится на это",
+                   "в пятницу собеседование"],
+        "touched": [99], "closed": [],
+        "view": "Человек, который жалуется на мелочи, чтобы не говорить о "
+                "главном. Мне с ним легко.",
+        "moment": "Он первым рассказал мне про дочь - просто так, между делом.",
+    }, ensure_ascii=False)),
+    ("он", json.dumps({
+        "facts": ["взяли на новую работу, будет тимлидом"],
+        "confirmed": [2],
+        "dropped": [{"n": 1, "why": "уже не бэкенд"}, {"n": 42, "why": "?"}],
+        # №1 — ЕГО СОБСТВЕННАЯ нить из фикстура (side = 'self'). Проход её
+        # не видел и закрыть не может: закрываются только показанные.
+        "opened": [], "touched": [], "closed": [1, 2, 3],
+        "view": None, "moment": None,
+    }, ensure_ascii=False)),
+]
+
+
+def _dump_him(eng) -> str:
+    lines = ["факты о нём:"]
+    for f in eng.all_him_facts():
+        state = (f"закрыт {f['dropped_at']} ({f['dropped_why']})"
+                 if f["dropped_at"] else "открыт")
+        lines.append(f"  [{f['id']}] hits {f['hits']} | {state} | {f['text']}")
+    lines.append("его дела:")
+    for t in eng.all_threads():
+        if t["side"] != "user":
+            continue
+        state = f"{t['closed_why']} {t['closed_at']}" if t["closed_at"] else "открыто"
+        lines.append(f"  [{t['id']}] {state} | {t['text']}")
+    seen = eng.him_view()
+    lines.append(f"взгляд ({iso(seen['at'])}): {seen['view']}")
+    return "\n".join(lines)
+
+
+def _run_him() -> str:
+    """Собеседник: два разговора, три читателя.
+
+    - **промпт прохода** — целиком, на первом разговоре: что уже известно
+      (ничего), транскрипт лентой и правила. Правило «только то, что он сказал
+      о СЕБЕ» — то, что отделяет знание о человеке от выдумки о нём;
+    - **после каждого разговора** — факты, его дела, взгляд. Дубль и пустая
+      строка отброшены, номер, которого не показывали, пропущен;
+    - **момент** — одна строка в биографии с источником `lived`;
+    - **читатели** — блок системного промпта, краткое в «чем заняться» и
+      новое дело в меню. Во втором разговоре дела закрыты, и «разобраться в
+      его деле» из меню уходит само.
+    """
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_HIM_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key="ключ-заглушка")
+    import him as him_mod
+
+    before = len(eng.all_memories())
+    first = him_mod.learn(eng, edges, eng.snapshot(HIM_FIRST),
+                          {"messages": _HIM_TALK_1}, HIM_FIRST)
+    prompt_1 = llm.seen[0][-1]["content"]
+    after_1 = _dump_him(eng)
+    moment = [m for m in eng.all_memories() if m["source"] == "lived"]
+
+    turn_1 = eng.snapshot(HIM_FIRST)
+    system = build_system_prompt(turn_1, HIM_FIRST.astimezone(TZ))
+    block = system[system.index("Тот, с кем ты говоришь"):]
+    block = block.split("\n\n")[0]
+    menu_1 = agenda_mod.available(eng, edges)
+
+    second = him_mod.learn(eng, edges, eng.snapshot(HIM_SECOND),
+                           {"messages": _HIM_TALK_2}, HIM_SECOND)
+    prompt_2 = llm.seen[1][-1]["content"]
+    after_2 = _dump_him(eng)
+    menu_2 = agenda_mod.available(eng, edges)
+    brief = him_mod.render_brief(eng.snapshot(HIM_SECOND).him)
+
+    none = him_mod.learn(eng, edges, eng.snapshot(HIM_SECOND),
+                         {"messages": [{"role": "assistant", "spontaneous": True,
+                                        "text": "Сказал в пустоту."}]}, HIM_SECOND)
+
+    return (
+        f"ПРОМПТ ПРОХОДА (первый разговор):\n{prompt_1}\n"
+        f"{'=' * 60}\n"
+        f"разобрано: {json.dumps(first, ensure_ascii=False)}\n"
+        f"{after_1}\n"
+        f"биография: было {before}, стало {len(eng.all_memories())} "
+        f"(момент: {moment[0]['text'] if moment else '—'})\n"
+        f"{'=' * 60}\n"
+        f"БЛОК СИСТЕМНОГО ПРОМПТА:\n{block}\n"
+        f"{'=' * 60}\n"
+        f"меню «чем заняться» при открытых его делах: "
+        f"{'tend' in menu_1} — {menu_1.get('tend')}\n"
+        f"{'=' * 60}\n"
+        f"ПРОМПТ ПРОХОДА (второй разговор) — известное с номерами:\n"
+        + prompt_2[prompt_2.index("Как он видел"):prompt_2.index("Разговор:")]
+        + f"{'=' * 60}\n"
+        f"разобрано: {json.dumps(second, ensure_ascii=False)}\n"
+        f"{after_2}\n"
+        f"меню при закрытых делах: {'tend' in menu_2}\n"
+        f"кратко для «чем заняться»:\n{brief}\n"
+        f"{'=' * 60}\n"
+        f"разговор без его реплик: {none} (модель не звалась)\n"
+        f"{'=' * 60}\n"
+        "вызовы модели по порядку:\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
+    )
+
+
+# --- Сценарий ГОЛОСА (Шаг 60) ----------------------------------------------
+# Тяга выводится из черт; отклик считается по ответам; серия без ответа
+# удваивает паузу; тишина, в которой не говорили никогда, отсчитывается от
+# рождения и называется своим поводом.
+VOICE_NOW = NOW + timedelta(days=2)
+
+_VOICE_SCRIPT = [
+    ("голос", "0.8 | ироничный и замечает всё - держать при себе ему трудно"),
+]
+
+
+def _run_voice() -> str:
+    eng = open_engine()
+    net = _FakeNet()
+    journal: list[str] = []
+    llm = _StubLLM(_VOICE_SCRIPT, journal)
+    edges = cycle.Edges(llm=llm, http=net, search=net, search_key=None)
+    import voice as voice_mod
+
+    out = []
+    v0 = voice_mod.voice(eng, VOICE_NOW)
+    out.append(f"чистый старт:        {voice_mod.describe(v0)}")
+
+    # Тяга: черт пересмотра ещё не было — проход молчит; черты пересмотрены —
+    # проход зовётся ровно один раз, второй заход молчит.
+    idle = voice_mod.talk_tick(eng, edges, VOICE_NOW)
+    with eng.unit():
+        eng.set_traits(list(eng.snapshot(VOICE_NOW).traits), VOICE_NOW)
+        eng.record_traits([{"name": "ироничный", "reason": "говорит о себе как о постороннем"},
+                           {"name": "внимательный", "reason": "замечает чужой ранец"},
+                           {"name": "упрямый", "reason": "месяц ходил с чужим"}], VOICE_NOW)
+    talk = voice_mod.talk_tick(eng, edges, VOICE_NOW + timedelta(minutes=1))
+    again = voice_mod.talk_tick(eng, edges, VOICE_NOW + timedelta(minutes=2))
+    prompt = llm.seen[0][-1]["content"] if llm.seen else "(не звался)"
+    v1 = voice_mod.voice(eng, VOICE_NOW)
+    out.append(f"тяга до черт: {idle}; после: {talk}; повторно: {again}")
+    out.append(f"с тягой:             {voice_mod.describe(v1)}")
+
+    # Три реплики в пустоту: отклик падает, пауза удваивается.
+    for i, h in enumerate((0, 5, 10)):
+        with eng.unit():
+            eng.append_utterance(f"в пустоту {i + 1}", VOICE_NOW + timedelta(hours=h))
+    at = VOICE_NOW + timedelta(hours=14)
+    v2 = voice_mod.voice(eng, at)
+    out.append(f"три без ответа:      {voice_mod.describe(v2)}")
+
+    # Он ответил на третью через час — серия обнулилась, отклик вырос.
+    with eng.unit():
+        eng.append_exchange("я тут, просто был занят", "Понял.",
+                            VOICE_NOW + timedelta(hours=11))
+    v3 = voice_mod.voice(eng, at)
+    out.append(f"ответил на третью:   {voice_mod.describe(v3)}")
+
+    # Никогда не разговаривали: сообщений нет, метки нет — тишина от рождения.
+    with eng.unit():
+        eng.conn.execute("DELETE FROM messages")
+        eng.conn.execute("UPDATE agent SET last_exchange_ts = NULL WHERE id = 1")
+    never_at = NOW + timedelta(days=12)
+    quiet = cycle.silence_urge(eng, never_at)
+    picked = cycle._pick_impulse(eng, never_at)
+    out.append(f"ни разу не говорили: рождение записано {iso(eng.first_breath())}, "
+               f"тишина {quiet:.2f}, повод {picked['kind']}/{picked.get('reason')}")
+
+    return (
+        "\n".join(out)
+        + f"\n{'=' * 60}\nПРОМПТ ТЯГИ:\n{prompt}\n"
+        + f"{'=' * 60}\nРЕМАРКА первой реплики в пустоту:\n"
+        + mind.render_initiative(picked)
+        + f"\n{'=' * 60}\nвызовы модели по порядку:\n"
+        + "\n".join(f"{i}. {line}" for i, line in enumerate(journal, 1))
     )
 
 
@@ -3661,6 +3887,10 @@ def render(name: str) -> str:
         return _run_day()
     if name == "reading":
         return _run_reading()
+    if name == "him":
+        return _run_him()
+    if name == "voice":
+        return _run_voice()
     if name == "initiative":
         return _run_initiative()
     if name == "http":

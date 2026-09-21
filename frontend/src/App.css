@@ -192,3 +192,27 @@
 .life-muted { opacity: .6; font-size: .9em; }
 .life-outcome { margin-top: .2rem; font-style: italic; opacity: .85; }
 .life details { margin-top: .6rem; }
+
+/* Шаг 61: мысли вслух — внутреннее рядом с разговором, тише реплик. */
+.log .inner {
+  align-self: center;
+  max-width: 90%;
+  font-size: 0.85em;
+  font-style: italic;
+  opacity: 0.6;
+  background: none;
+  border: none;
+  margin: 0.2em 0;
+  text-align: center;
+}
+.log .inner .inner-label {
+  font-style: normal;
+  font-weight: 600;
+}
+.inner-toggle {
+  font-size: 0.85em;
+  opacity: 0.8;
+  margin-right: 0.75em;
+  cursor: pointer;
+  user-select: none;
+}
