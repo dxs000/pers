@@ -795,6 +795,7 @@ _NEWS = {"news": None}
 _DRIVES = {"drives": None}
 _AGENDA = {"agenda": None}
 _EMBED = {"embed": None}
+_PARSE = {"parse": None}
 
 # Двенадцатое семейство: черты (Шаг 42). Отдельно от сценариев записи
 # (`writes`), хотя тоже про запись: те сверяют СНИМОК после слияния, а здесь
@@ -865,7 +866,7 @@ _PROMISES = {"promises": None}
 _READING = {"reading": None}
 
 SCENARIOS = {**_SYSTEM, **_SERVICE, **_WRITES, **_TURN, **_INITIATIVE,
-             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_NEWS, **_DRIVES, **_AGENDA, **_EMBED, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
+             **_BIOGRAPHY, **_DREAM, **_CURIOSITY, **_NEWS, **_DRIVES, **_AGENDA, **_EMBED, **_PARSE, **_TRAITS, **_PROMISES, **_MOOD, **_ANNIVERSARY, **_DAY,
              **_READING, **_BIRTH, **_INSPECT, **_HTTP, **_GENESIS}
 
 # `empty` — ЧИСТЫЙ СТАРТ, и он идёт через движок, как все остальные.
@@ -3080,6 +3081,29 @@ def _run_embed() -> str:
     )
 
 
+# --- Сценарий РАЗБОРА (Шаг 58.3) -------------------------------------------
+# Ответы модели с хвостом. Первый случай — дословно из живого лога: биограф
+# ответил `[]` и объяснил почему, строгий разбор упал. Второй — то, что при
+# этом терялось: событие с пояснением строкой ниже.
+_PARSE_CASES = [
+    "[]\nСтанислав в этой реплике не рассказывает о конкретном событии из своей жизни.",
+    'В реплике есть событие:\n[{"age": 20, "precision": "year", "text": "Устроился на почту, как мать."}]\nЭто конкретный случай с местом.',
+    '```json\n[{"age": 20, "precision": "year", "text": "Устроился на почту."}]\n```\nПояснение после ограды.',
+    'Скобки в пояснении [вот такие] не мешают: [{"age": 7, "precision": "era", "text": "Мешок с письмами."}]',
+    "совсем не JSON",
+]
+
+
+def _run_parse() -> str:
+    """Терпимый разбор: первое целое JSON-значение, хвост — мимо."""
+    lines = []
+    for raw in _PARSE_CASES:
+        head = raw.replace("\n", " / ")[:70]
+        got = mind._parse_biographer_output(raw, 70)
+        lines.append(f"«{head}…»\n  -> {json.dumps(got, ensure_ascii=False)}")
+    return "биограф, возраст сейчас 70:\n" + "\n".join(lines)
+
+
 def _run_initiative() -> str:
     """Персонаж заговаривает сам: три захода, из них говорящий один.
 
@@ -3623,6 +3647,8 @@ def render(name: str) -> str:
         return _run_agenda()
     if name == "embed":
         return _run_embed()
+    if name == "parse":
+        return _run_parse()
     if name == "traits":
         return _run_traits()
     if name == "promises":

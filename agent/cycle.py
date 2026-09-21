@@ -834,6 +834,22 @@ def promise_tick(eng, edges: Edges, now: datetime, *,
     return text
 
 
+# Лог исчерпанного бюджета (Шаг 58.3). Тик раз в минуту, и строка
+# «бюджет исчерпан» шла каждую минуту, пока окно не освободится, — 60 строк в
+# час, за которыми не видно ничего другого. Теперь строка пишется, когда бюджет
+# кончился, и дальше не чаще раза в час; освободился — метка сбрасывается.
+_BUDGET_LOG: dict = {"at": None}
+BUDGET_LOG_EVERY_HOURS = 1.0
+
+
+def _log_budget_spent(now) -> None:
+    last = _BUDGET_LOG["at"]
+    if last is not None and 0.0 <= (now - last).total_seconds() / 3600.0 < BUDGET_LOG_EVERY_HOURS:
+        return
+    _BUDGET_LOG["at"] = now
+    logging.info("инициатива: бюджет суток исчерпан (%s за 24 ч)", UTTERANCES_PER_DAY)
+
+
 def background_tick(eng, edges: Edges, now: datetime, *,
                     announce: Callable[[str], None] | None = None,
                     tz=None) -> str | None:
@@ -886,8 +902,9 @@ def background_tick(eng, edges: Edges, now: datetime, *,
         if 0.0 <= idle < UTTERANCE_COOLDOWN_HOURS:
             return None
     if eng.utterances_since(now - timedelta(days=1)) >= UTTERANCES_PER_DAY:
-        logging.info("инициатива: бюджет суток исчерпан (%s)", UTTERANCES_PER_DAY)
+        _log_budget_spent(now)
         return None
+    _BUDGET_LOG["at"] = None
 
     impulse = _pick_impulse(eng, now)
     if not impulse:

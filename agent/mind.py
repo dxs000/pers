@@ -642,7 +642,7 @@ def _parse_extractor_output(row: str) -> list[dict]:
     result = []
     
     try:
-        data = json.loads(_strip_fences(row))
+        data = _loads_lenient(row)
     except json.JSONDecodeError:
         logging.warning("extractor: невалидный JSON %s", row[:200])    
         return []
@@ -673,7 +673,7 @@ def _parse_extractor_output(row: str) -> list[dict]:
 
 def _parse_reflector_output(row: str) -> list[dict]:
     try:
-        data = json.loads(_strip_fences(row))
+        data = _loads_lenient(row)
     except json.JSONDecodeError:
         logging.warning("reflect_self: невалидный JSON %s", row[:200])
         return []
@@ -712,6 +712,33 @@ def _traits_clause(traits: str) -> str:
     сообщение из возможных для прохода, который пишет от его лица.
     """
     return f" Его черты: {traits}." if traits else ""
+
+
+def _loads_lenient(text: str):
+    """Первое целое JSON-значение из ответа модели; хвост отбрасывается.
+
+    Шаг 58.3. Модель отвечает `[]`, а следом дописывает, почему пусто, —
+    строгий `json.loads` на хвосте падает. Пока ответ пустой, вреда нет: упавший
+    разбор тоже даёт «ничего». Но биограф, нашедший событие и объяснивший его
+    строкой ниже, терял событие вместе с объяснением, а это необратимо: реплика
+    не повторится. Здесь берётся первое значение, которое разбирается целиком
+    (`raw_decode`), начиная с первой `[` или `{`; пояснение до и после — мимо.
+    Бросает `JSONDecodeError`, как `json.loads`, если значения нет вовсе.
+    """
+    s = _strip_fences(text)
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError as first:
+        decoder = json.JSONDecoder()
+        starts = [k for k, ch in enumerate(s) if ch in "[{"][:20]
+        for k in starts:
+            try:
+                value, _end = decoder.raw_decode(s, k)
+            except json.JSONDecodeError:
+                continue
+            logging.debug("JSON с хвостом: взято значение с позиции %s", k)
+            return value
+        raise first
 
 
 def _pick_assertions(assertions: list[dict], limit:int) -> list[dict]:
@@ -2156,7 +2183,7 @@ def _parse_biographer_output(row: str, age_now: int) -> list[dict]:
     сломать ось жизни необратимо.
     """
     try:
-        data = json.loads(_strip_fences(row))
+        data = _loads_lenient(row)
     except json.JSONDecodeError:
         logging.warning("биограф: невалидный JSON %s", row[:200])
         return []
@@ -2682,7 +2709,7 @@ def _parse_dream_output(row: str, age_now: int | None) -> dict | None:
     записать такое значит сломать ось жизни необратимо.
     """
     try:
-        data = json.loads(_strip_fences(row))
+        data = _loads_lenient(row)
     except json.JSONDecodeError:
         logging.warning("сон: невалидный JSON %s", row[:200])
         return None
