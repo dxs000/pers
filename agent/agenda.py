@@ -492,7 +492,27 @@ def _drive_text(choice, drives) -> str | None:
     return None
 
 
-def build_recall_prompt(turn, choice, drives, canon, born, age_now: int) -> str:
+def _recall_when(choice, anc) -> str:
+    """Про время вспомненного (Шаг 64). Тема — его выбор, время — нет.
+
+    Тему выбрал персонаж (`choice.about`), и если она сама держит его в одном
+    времени («про отца», «про армию»), тяга ей не указ: навязать время
+    выбранному воспоминанию значило бы решить за него. Тяга — подсказка «если
+    тема не держит». Выбрал «что придёт само» — время вытянуто, и это уже не
+    подсказка: без неё «само» из приоров модели приходит детством.
+    """
+    if anc is None:
+        return ""
+    years = f"{anc.age} {timeutil.years_word(anc.age)}"
+    if choice.get("about"):
+        return (f"Если тема сама не держит тебя в одном времени, это было, "
+                f"когда тебе было около {years}.\n")
+    return (f"Пришло из того времени, когда тебе было около {years}: где ты "
+            "тогда жил, чем был занят, кто был рядом.\n")
+
+
+def build_recall_prompt(turn, choice, drives, canon, born, age_now: int,
+                        anc=None, now=None) -> str:
     from drives import render_canon_numbered
     about = choice["about"] or "что придёт само"
     return (
@@ -500,7 +520,8 @@ def build_recall_prompt(turn, choice, drives, canon, born, age_now: int) -> str:
         f"Почему сейчас: {choice['why']}.\n"
         f"{_drive_line(choice, drives)}\n"
         "Вся твоя жизнь, как она записана:\n"
-        f"{render_canon_numbered(canon, born)}\n\n"
+        f"{render_canon_numbered(canon, born, now)}\n\n"
+        f"{_recall_when(choice, anc)}"
         "Что вспомнилось? Одна сцена, которой в записанном ЕЩЁ НЕТ: не "
         "пересказ известного, а то, что всплыло рядом с ним. Конкретное: "
         "место, слово, вещь, погода. Не значительное - люди чаще помнят "
@@ -529,8 +550,11 @@ def _recall(eng, edges, turn, choice, drives, now, tz) -> str | None:
     if born is None or age_now is None:
         return None
     canon = eng.all_memories()
+    import anchor as anchor_mod
+    anc = anchor_mod.draw(canon, born, age_now, now, "recall")
     data = _parse_json(_ask(edges.llm, build_recall_prompt(turn, choice, drives,
-                                                           canon, born, age_now),
+                                                           canon, born, age_now,
+                                                           anc, now),
                             full=True) or "") or {}
     # Вернулся к записанному (Шаг 57.1). Первая редакция такого исхода не
     # знала: модель описывала известное своими словами, сверка отвечала «уже
@@ -555,6 +579,14 @@ def _recall(eng, edges, turn, choice, drives, now, tz) -> str | None:
     if not (0 <= age <= age_now) or precision not in ("era", "year", "month", "day") \
             or not text:
         return "не вспомнилось"
+    # «Что придёт само» с вытянутым временем, а пришло другое — не пишется
+    # (Шаг 64, довод сна: сдвинуть дату сцены нельзя).
+    if anc is not None and not choice.get("about"):
+        lo, hi = anc.window()
+        if not lo <= age <= hi:
+            log.info("вспоминание: пришло в %s лет, тянуло к %s–%s — не пишу",
+                     age, anc.lo, anc.hi)
+            return f"вспомнилось, но не то время - не записал: {text}"
     # Дубль ловится вектором ДО сверки (Шаг 58). Мысль, пересказавшая
     # записанное своими словами, — это возврат к нему, и он засчитывается как
     # возврат: вес строки растёт, модель сверки не зовётся. Порог высокий

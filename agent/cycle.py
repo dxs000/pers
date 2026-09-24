@@ -1090,10 +1090,26 @@ def dream_tick(eng, edges: Edges, now: datetime, *, tz=None) -> str | None:
     thoughts = [p for p in eng.recent_pursuits(now, 12)
                 if p["action"] in ("daydream", "explore", "tend") and p.get("outcome")
                 and (timeutil.parse_ts(p["at"]) or now) > now - timedelta(hours=30)][-4:]
+    # Время вспомненного тянет машина, туда, где в жизни пусто (Шаг 64).
+    import anchor as anchor_mod
+    anc = anchor_mod.draw(canon, born, age_now, now, "dream")
+    if anc is not None:
+        logging.info("сон: тяга — около %s (отрезок %s–%s, вспомнено %s)",
+                     anc.age, anc.lo, anc.hi, anc.filled)
     seen = dream(turn, canon, born, age_now, edges.llm, now=now.astimezone(tz),
-                 thoughts=thoughts)
+                 thoughts=thoughts, anchor=anc)
     if not seen:
         return None
+    # Модель ушла из вытянутого времени — вспомненное не пишется. Сдвинуть
+    # возраст к тяге нельзя: сцена из детства, датированная сорока годами,
+    # ломает ось жизни необратимо. Сон при этом записывается как обычно.
+    rec = seen.get("recalled")
+    if rec and anc is not None:
+        lo, hi = anc.window()
+        if not lo <= rec["age"] <= hi:
+            logging.info("сон: вспомнилось в %s лет, а тянуло к %s–%s — не пишу: %s",
+                         rec["age"], anc.lo, anc.hi, rec["text"][:60])
+            seen = {**seen, "recalled": None}
 
     # Вспомненное проходит ТЕ ЖЕ ворота, что кандидат биографа. Ворота одни на
     # обоих писателей — два разных правила «что считать противоречием»

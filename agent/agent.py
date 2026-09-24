@@ -368,6 +368,26 @@ def cmd_voice() -> int:
     return 0
 
 
+def cmd_shape() -> int:
+    """Форма биографии: где жизнь вспомнена, где пусто (Шаг 64)."""
+    import anchor as anchor_mod
+    eng = engine_mod.open_engine()
+    try:
+        now = datetime.now(timezone.utc)
+        turn = eng.snapshot(now)
+        born = timeutil.parse_ts(turn.born_at or "")
+        age_now = timeutil.age_years(born, now)
+        canon = eng.all_memories()
+        print(f"{turn.name or '(без имени)'}, {age_now} — вспомнено по отрезкам жизни:")
+        print(anchor_mod.render_shape(canon, born, age_now))
+        a = anchor_mod.draw(canon, born, age_now, now, "dream")
+        if a is not None:
+            print(f"сон сейчас тянул бы к {a.age} (отрезок {a.lo}–{a.hi})")
+    finally:
+        eng.close()
+    return 0
+
+
 def cmd_embed(text: str | None) -> int:
     """Досчитать векторы биографии и показать, что ближе к `text` (Шаг 58).
 
@@ -490,6 +510,8 @@ def main() -> int:
                         help="одно решение «чем заняться» сейчас")
     parser.add_argument("--voice", action="store_true",
                         help="как он сейчас говорит и что знает о собеседнике")
+    parser.add_argument("--shape", action="store_true",
+                        help="форма биографии: где жизнь вспомнена, где пусто")
     parser.add_argument("--embed", nargs="?", const="", metavar="ТЕКСТ",
                         help="досчитать векторы биографии; с текстом — показать ближайшие")
     args = parser.parse_args()
@@ -512,6 +534,8 @@ def main() -> int:
         return cmd_agenda()
     if args.voice:
         return cmd_voice()
+    if args.shape:
+        return cmd_shape()
     if args.embed is not None:
         return cmd_embed(args.embed or None)
     signal.signal(signal.SIGTERM, _on_signal)

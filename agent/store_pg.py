@@ -299,7 +299,7 @@ def build_snapshot(conn, now, limit: int = 7, about=None) -> Turn:
         SELECT id, happened_at, precision, text, source, weight, told_at
           FROM memories
          ORDER BY surface_score(weight, last_recalled, created_at,
-                                surfaced_at, source, %s) DESC,
+                                surfaced_at, source, %s, happened_at) DESC,
                   happened_at, id
          LIMIT %s
         """,

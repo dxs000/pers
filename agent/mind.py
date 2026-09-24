@@ -316,7 +316,7 @@ def build_system_prompt(
         lines = "\n".join(f"- {a['key']}: {a['value']}" for a in picked)
         parts.append("Что ты знаешь о себе:\n" + lines)
 
-    memories_block = _render_memories(turn.memories, born)
+    memories_block = _render_memories(turn.memories, born, now)
     if memories_block:
         parts.append(
             "Что тебе сейчас вспоминается "
@@ -1123,7 +1123,7 @@ def _render_episodes(episodes, now) -> str | None:
 # `days // 365` даёт лишний год у всякого, кто прожил больше сорока, и
 # промахивается именно на круглых датах — там, где ошибку заметит человек.
 
-def _memory_when(m: dict, born: datetime | None) -> str:
+def _memory_when(m: dict, born: datetime | None, now=None) -> str:
     """Когда это было — так, как об этом сказал бы человек.
 
     **Датой почти никогда, возрастом почти всегда.** «1 сентября 2000 года»
@@ -1137,6 +1137,9 @@ def _memory_when(m: dict, born: datetime | None) -> str:
     читателя дороже, чем не называть месяц вовсе.
     """
     at = timeutil.parse_ts(m.get("happened_at") or "")
+    recent = _recent_when(at, now)
+    if recent:
+        return recent
     age = timeutil.age_years(born, at)
     if age is None or age < FIRST_MEMORY_AGE:
         return "ещё до всякой твоей памяти, с чужих слов"
@@ -1149,6 +1152,43 @@ def _memory_when(m: dict, born: datetime | None) -> str:
         # должен выдавать приблизительное за точное.
         return f"тебе было лет {age}"
     return f"тебе было {age}"
+
+
+# =============================================================================
+# Недавнее — от сегодня, а не от рождения (Шаг 64)
+# =============================================================================
+# До шага всё записанное датировалось возрастом: вчерашний прожитый день
+# приезжал в промпт как «23 сентября 2026-го, тебе было 58» — тем же оборотом,
+# что и детство («тебе было лет 8»). Прошедшее время и возраст в каждой строке
+# превращали настоящее в мемуары: персонаж читал о своей неделе как о давно
+# минувшем и говорил о ней так же. Так разговаривают старики.
+#
+# Человек о недавнем говорит от сегодня: «вчера», «на прошлой неделе». Порог —
+# `RECENT_DAYS`: дальше отсчёт от сегодня теряет смысл («месяца три назад»
+# уже почти «этой весной»), и возраст снова честнее. Слова берутся из
+# `timeutil.AGE_BUCKETS` — тех же, которыми датируются эпизоды, — кроме
+# первых двух суток: там точнее календарь («вчера»), чем часы («недавно»).
+#
+# `now` — необязательный: читатели без часов (инспектор, старые эталоны)
+# получают прежний рендер байт-в-байт.
+RECENT_DAYS = 70
+
+
+def _recent_when(at: datetime | None, now) -> str | None:
+    if at is None or now is None:
+        return None
+    delta = now - at
+    if delta.total_seconds() < 0 or delta.days >= RECENT_DAYS:
+        return None
+    tz = now.tzinfo or timezone.utc
+    days = (now.astimezone(tz).date() - at.astimezone(tz).date()).days
+    if days == 0:
+        return "сегодня"
+    if days == 1:
+        return "вчера"
+    if days == 2:
+        return "позавчера"
+    return timeutil.humanize_age(at, now)
 
 
 # Происхождение воспоминания — словом, и только там, где оно меняет смысл
@@ -1224,7 +1264,8 @@ def told_memories(memories, answer: str) -> list[dict]:
     return out
 
 
-def _render_memories(memories: list[dict] | None, born: datetime | None) -> str | None:
+def _render_memories(memories: list[dict] | None, born: datetime | None,
+                     now=None) -> str | None:
     """Блок воспоминаний. Порядок — по жизни, а не по весу.
 
     Хранилище отдаёт их отсортированными по весу: это порядок ОТБОРА, и он
@@ -1249,7 +1290,7 @@ def _render_memories(memories: list[dict] | None, born: datetime | None) -> str 
         text = (m.get("text") or "").strip()
         if not text:
             continue
-        lines.append(f"- [{_memory_when(m, born)}] {_memory_mark(m)}{text}")
+        lines.append(f"- [{_memory_when(m, born, now)}] {_memory_mark(m)}{text}")
     return "\n".join(lines) if lines else None
 
 
@@ -2104,7 +2145,8 @@ VERDICT_KNOWN = "уже есть"
 VERDICTS = (VERDICT_WRITE, VERDICT_CONTRADICTS, VERDICT_KNOWN)
 
 
-def _render_canon(memories: list[dict] | None, born: datetime | None) -> str:
+def _render_canon(memories: list[dict] | None, born: datetime | None,
+                  now=None) -> str:
     """Уже записанное — для биографа и для сверки.
 
     Отличается от `_render_memories` тем, что здесь НЕ отбор: сверять надо со
@@ -2117,7 +2159,7 @@ def _render_canon(memories: list[dict] | None, born: datetime | None) -> str:
     for m in sorted(memories, key=lambda x: x.get("happened_at") or ""):
         text = (m.get("text") or "").strip()
         if text:
-            lines.append(f"- [{_memory_when(m, born)}] {_memory_mark(m)}{text}")
+            lines.append(f"- [{_memory_when(m, born, now)}] {_memory_mark(m)}{text}")
     return "\n".join(lines) if lines else "(пока ничего не записано)"
 
 
@@ -2511,7 +2553,7 @@ def _build_day_prompt(turn: Turn, canon: list[dict], born: datetime | None,
     parts.append("")
 
     parts.append("Вся его жизнь, как она записана:")
-    parts.append(_render_canon(canon, born) + "\n")
+    parts.append(_render_canon(canon, born, now) + "\n")
 
     if threads:
         parts.append(
@@ -2678,7 +2720,8 @@ def day(turn: Turn, canon: list[dict], born: datetime | None,
 
 def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
                         age_now: int | None, now=None,
-                        thoughts: list[dict] | None = None) -> str:
+                        thoughts: list[dict] | None = None,
+                        anchor=None) -> str:
     """Промпт сна. Дневной остаток обязателен, и он тут не для колорита.
 
     Сон без входа — генератор случайного: модель, которой дали только имя и
@@ -2702,7 +2745,7 @@ def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
         who,
         f"К ночи его настроение - {turn.mood}.\n",
         "Вся его жизнь, как она записана:",
-        _render_canon(canon, born) + "\n",
+        _render_canon(canon, born, now) + "\n",
     ]
 
     picked = _pick_assertions(turn.self_assertions, SELF_ASSERTION_LIMIT)
@@ -2765,8 +2808,8 @@ def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
         "разгадки в конце.\n"
         " - recalled: настоящее событие его жизни, которое сон задел и "
         "которого в записанном выше ЕЩЁ НЕТ. Не пересказ сна: сон уже "
-        "записан полем выше. Поля те же, что у биографа: age - сколько ему "
-        f"было лет (целое от 0 до {age_now}); precision - 'era', 'year', "
+        "записан полем выше. " + _recalled_age_clause(anchor, age_now) +
+        "precision - 'era', 'year', "
         "'month' или 'day'; text - одна сцена, от первого лица, 1-2 фразы.\n"
         " - recalled может быть null, и это обычный исход. Ночь, в которую "
         "ничего не вспомнилось, - обычная ночь.\n"
@@ -2778,6 +2821,24 @@ def _build_dream_prompt(turn: Turn, canon: list[dict], born: datetime | None,
         "должно противоречить ничему из записанного выше."
     )
     return "\n".join(parts)
+
+
+def _recalled_age_clause(anchor, age_now) -> str:
+    """Про поле `age`: кто выбирает время вспомненного (Шаг 64).
+
+    Без тяги — как раньше: модель выбирает сама из всей жизни, и выбирает
+    детство. С тягой время уже вытянуто (`anchor.draw`), и модели остаётся
+    вспомнить, что тогда было. Сон задевает это время любым краем — через
+    место, вещь, человека, — и связь не обязана быть очевидной.
+    """
+    if anchor is None:
+        return ("Поля те же, что у биографа: age - сколько ему "
+                f"было лет (целое от 0 до {age_now}); ")
+    return ("Сон задел то время, когда ему было около "
+            f"{anchor.age} {timeutil.years_word(anchor.age)} - не детство и не "
+            "сегодня, если только это не они. Что тогда было в его жизни: "
+            "где жил, чем был занят, кто был рядом? "
+            f"Поля: age - сколько ему было (целое от {anchor.lo} до {anchor.hi}); ")
 
 
 def _parse_dream_output(row: str, age_now: int | None) -> dict | None:
@@ -2834,7 +2895,7 @@ def _parse_dream_output(row: str, age_now: int | None) -> dict | None:
 
 def dream(turn: Turn, canon: list[dict], born: datetime | None,
           age_now: int | None, client, now=None,
-          thoughts: list[dict] | None = None) -> dict | None:
+          thoughts: list[dict] | None = None, anchor=None) -> dict | None:
     """Что приснилось этой ночью, или `None`. Любая неудача — не снилось.
 
     Молчание, а не заглушка: ночь без снов — законная ночь, и отличить
@@ -2847,7 +2908,8 @@ def dream(turn: Turn, canon: list[dict], born: datetime | None,
     """
     if born is None or age_now is None:
         return None
-    prompt = _build_dream_prompt(turn, canon, born, age_now, now, thoughts)
+    prompt = _build_dream_prompt(turn, canon, born, age_now, now, thoughts,
+                                 anchor)
     try:
         response = client.chat.completions.create(
             model=config.DEEPSEEK_MODEL,

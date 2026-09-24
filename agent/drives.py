@@ -175,13 +175,13 @@ def _text_of(current: list[dict], drive_id: int) -> str:
 # Промпт
 # =============================================================================
 
-def render_canon_numbered(canon: list[dict], born) -> str:
+def render_canon_numbered(canon: list[dict], born, now=None) -> str:
     """Биография с номерами строк. Номер — `memories.id`, а не порядковый:
     он же уедет в `drive_sources`, и сверять его есть с чем."""
     if not canon:
         return "(пока ничего не записано)"
     return "\n".join(
-        f"[#{m['id']}] [{_memory_when(m, born)}] {_memory_mark(m)}{m['text']}"
+        f"[#{m['id']}] [{_memory_when(m, born, now)}] {_memory_mark(m)}{m['text']}"
         for m in canon
     )
 
