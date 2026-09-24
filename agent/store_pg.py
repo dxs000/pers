@@ -296,9 +296,10 @@ def build_snapshot(conn, now, limit: int = 7, about=None) -> Turn:
     # вставки. Разница видна ровно на чистом старте, где равны все.
     memories = conn.execute(
         """
-        SELECT id, happened_at, precision, text, source, weight
+        SELECT id, happened_at, precision, text, source, weight, told_at
           FROM memories
-         ORDER BY recall_score(weight, last_recalled, created_at, %s) DESC,
+         ORDER BY surface_score(weight, last_recalled, created_at,
+                                surfaced_at, source, %s) DESC,
                   happened_at, id
          LIMIT %s
         """,
@@ -366,6 +367,9 @@ def build_snapshot(conn, now, limit: int = 7, about=None) -> Turn:
                 "text": m["text"],
                 "source": m["source"],
                 "weight": m["weight"],
+                # Шаг 63: рассказывал ли уже. Похожие по смыслу приезжают из
+                # `store_embed` без этой колонки — отсюда `.get`.
+                "told_at": iso(m.get("told_at")),
             }
             for m in memories
         ],
@@ -493,6 +497,51 @@ def touch_recall(conn, memories, now, bump: float = RECALL_BUMP) -> None:
          WHERE id = ANY(%s)
         """,
         (now, bump, RECALL_CEILING, ids),
+    )
+
+
+def _memory_ids(memories) -> list[int]:
+    ids = []
+    for m in memories or ():
+        raw = m.get("id") if isinstance(m, dict) else m
+        try:
+            ids.append(int(str(raw).split("_")[-1]))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def surface(conn, memories, now) -> None:
+    """Отметить, что строки ехали в промпт (Шаг 63). Вес и давность НЕ трогаются.
+
+    До Шага 63 на этом месте стоял `touch_recall`, и показ считался
+    вспоминанием. Отсюда замок: показанное получало лучший счёт и
+    показывалось снова (`0019_surfacing.sql`). Показ — не вспоминание;
+    вспоминание — когда персонаж об этом ЗАГОВОРИЛ, и это `note_told`.
+    """
+    ids = _memory_ids(memories)
+    if ids:
+        conn.execute("UPDATE memories SET surfaced_at = %s WHERE id = ANY(%s)",
+                     (now, ids))
+
+
+def note_told(conn, memories, now, bump: float = RECALL_BUMP) -> None:
+    """Персонаж рассказал: вспоминание в полном смысле (Шаг 63).
+
+    Двигает `last_recalled` и вес — ровно то, что раньше делал каждый показ,
+    — и ставит `told_at`, по которому промпт помечает «уже рассказывал».
+    """
+    ids = _memory_ids(memories)
+    if not ids:
+        return
+    conn.execute(
+        """
+        UPDATE memories
+           SET last_recalled = %s, told_at = %s,
+               weight = least(weight + %s, %s)
+         WHERE id = ANY(%s)
+        """,
+        (now, now, bump, RECALL_CEILING, ids),
     )
 
 

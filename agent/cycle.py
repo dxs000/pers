@@ -23,7 +23,8 @@ from mind import (CONSPECTUS_LIMIT, VERDICT_WRITE, build_system_prompt,
                   dream_subject, extract_memories, extract_objects, linger,
                   notice_promise, propose_birthplaces, propose_names,
                   read_portion, reflect_mood, reflect_self, reflect_traits,
-                  day, say_promise, speak_first, weather_family)
+                  day, say_promise, speak_first, told_memories,
+                  weather_family)
 from snapshot import SESSION_GAP_HOURS, clip_text, iso
 from openai import OpenAI, OpenAIError
 
@@ -111,8 +112,19 @@ def prompt_and_latch(eng, edges: Edges, now_dt: datetime, previous=None,
     # обе записи — след одного и того же прочтения памяти.
     with eng.unit():
         eng.remember_outside(snap, wx, now_dt, weather_family(wx))
-        eng.touch_recall(turn.memories, now_dt)
+        # Шаг 63: здесь строки только ВСПЛЫЛИ. Вспомненными их делает ответ
+        # (`handle_turn` → `note_told`), а не попадание в промпт — иначе
+        # показанное получало лучший счёт и показывалось вечно.
+        eng.surface(turn.memories, now_dt)
+    _LAST_SURFACED["memories"] = list(turn.memories)
     return prompt
+
+
+# Что всплыло в последнем собранном промпте. Модульная ячейка, а не второй
+# возврат `prompt_and_latch`: её сигнатуру читают сбруя и инспектор, и менять
+# её ради одного читателя значило бы красить эталоны без причины. Процесс
+# собирает промпт и ждёт ответа в одном потоке, так что ячейка не делится.
+_LAST_SURFACED: dict = {"memories": []}
 
 
 def look_outward(eng, user_text: str, objects: list[dict], edges: Edges,
@@ -224,9 +236,12 @@ def handle_turn(eng, edges: Edges, text: str, now: datetime, *,
         return Outcome(answer=None, error=str(err))
 
     answer = response.choices[0].message.content
+    told = told_memories(_LAST_SURFACED["memories"], answer or "")
 
     try:
         with eng.unit():
+            if told:
+                eng.note_told(told, now)
             eng.touch_exchange(now)
             reply_id = eng.append_exchange(text, answer, now, arrived_at)
             if inbox_ids:
@@ -968,7 +983,10 @@ def background_tick(eng, edges: Edges, now: datetime, *,
         # не сделала — считать это вспоминанием значило бы, что вес растёт от
         # неудачных попыток. Расхождение с `prompt_and_latch` намеренное: там
         # реплика уже отдана к моменту записи, здесь ещё нет.
-        eng.touch_recall(turn.memories, now)
+        eng.surface(turn.memories, now)
+        told = told_memories(turn.memories, text)
+        if told:
+            eng.note_told(told, now)
 
     logging.info("заговорил сам (%s, urge %.2f; %s): %s",
                  impulse["kind"], impulse["urge"], voice_mod.describe(v), text[:60])

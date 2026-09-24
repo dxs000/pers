@@ -25,7 +25,7 @@ def similar_memories(conn, vec, model: str, limit: int,
     """Ближайшие по смыслу, с похожестью. Только посчитанные этой моделью.
     `skip_sources` — какие источники не рассматривать (например, сны)."""
     rows = conn.execute(
-        """SELECT id, happened_at, precision, text, source, weight,
+        """SELECT id, happened_at, precision, text, source, weight, told_at,
                   embed_dot(embedding, %s::real[]) AS sim
              FROM memories
             WHERE embedding_model = %s AND embedding IS NOT NULL
@@ -40,7 +40,7 @@ def similar_memories(conn, vec, model: str, limit: int,
     # читатель (`build_snapshot` — через `iso`), и двойной перевод сломал бы его.
     return [{"id": r["id"], "happened_at": r["happened_at"],
              "precision": r["precision"], "text": r["text"], "source": r["source"],
-             "weight": r["weight"], "sim": round(float(r["sim"]), 3)} for r in rows]
+             "weight": r["weight"], "told_at": r["told_at"], "sim": round(float(r["sim"]), 3)} for r in rows]
 
 
 def embedded_count(conn, model: str) -> tuple[int, int]:

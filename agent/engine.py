@@ -93,6 +93,13 @@ class PgEngine:
         else:
             self._pg.touch_recall(self.conn, memories, now, bump)
 
+    # --- Показ и рассказ (Шаг 63) -------------------------------------------
+    def surface(self, memories, now: datetime) -> None:
+        self._pg.surface(self.conn, memories, now)
+
+    def note_told(self, memories, now: datetime) -> None:
+        self._pg.note_told(self.conn, memories, now)
+
     # --- Нити (Шаг 47) -------------------------------------------------------
     def open_threads(self, side: str = "self", limit: int | None = None) -> list[dict]:
         return self._pg.open_threads(self.conn, side, limit)

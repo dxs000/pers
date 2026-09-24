@@ -36,13 +36,20 @@ CURRENT_FIELDS = (
 )
 
 # Погода не меняется за реплику. TTL — единственное, что отделяет диалог
-# от сетевого запроса на каждый ход.
-WEATHER_TTL_MINUTES = 20.0
+# от сетевого запроса на каждый ход. Час: за окном видно смену дождя на
+# ясно, а не поминутную метеосводку.
+WEATHER_TTL_MINUTES = 60.0
 
 # Кэш живёт в процессе и умирает с ним: это не память, а сиюминутный
 # буфер. Ключ — округлённые координаты (переезд на соседнюю улицу не
 # должен считаться новым местом).
 _weather_cache: dict[tuple, tuple[datetime, dict]] = {}
+
+# Когда запрос в последний раз упал, по тому же ключу. Неудача тоже
+# держится TTL: сервис, не ответивший за таймаут, через минуту вряд ли
+# ответит, а каждый ход ждал бы его заново. До этой правки таймаут в 10 с
+# повторялся каждые ~70 с часами подряд.
+_failed_at: dict[tuple, datetime] = {}
 
 
 def geocode(name: str, client: httpx.Client, language: str = GEOCODER_LANGUAGE) -> dict | None:
@@ -129,8 +136,9 @@ def weather(
     запрос уходил бы на каждый ход. `now` приходит параметром — часов
     модуль не дёргает, как и `sky`.
 
-    Запрос упал, но в кэше что-то лежит — **отдаём протухшее** с меткой
-    `stale`. Часовой давности температура ближе к правде, чем молчание;
+    Запрос упал — следующий не раньше чем через `ttl_minutes`: неудача
+    держится так же, как удача. А пока в кэше что-то лежит — **отдаём
+    протухшее** с меткой `stale`. Часовой давности температура ближе к правде, чем молчание;
     решать, стоит ли её произносить, будет слой рендера.
     """
     key = (round(_as_float(lat) or 0.0, 2), round(_as_float(lon) or 0.0, 2))
@@ -142,6 +150,11 @@ def weather(
         # Отрицательный возраст — часы прыгнули назад; считаем кэш негодным.
         if timedelta(0) <= age < timedelta(minutes=ttl_minutes):
             return dict(payload, stale=False)
+
+    failed = _failed_at.get(key)
+    if failed is not None and timedelta(0) <= now - failed < timedelta(minutes=ttl_minutes):
+        # Молча: о неудаче уже сказано в лог, когда она случилась.
+        return _stale(cached)
 
     try:
         response = client.get(
@@ -157,15 +170,15 @@ def weather(
         payload = response.json()
     except httpx.HTTPError as err:
         logging.warning("weather: запрос упал: %s", err)
-        return _stale(cached)
+        return _fail(key, now, cached)
     except ValueError as err:
         logging.warning("weather: ответ не разобрался: %s", err)
-        return _stale(cached)
+        return _fail(key, now, cached)
 
     current = payload.get("current") if isinstance(payload, dict) else None
     if not isinstance(current, dict):
         logging.warning("weather: в ответе нет блока current")
-        return _stale(cached)
+        return _fail(key, now, cached)
 
     code = current.get("weather_code")
     data = {
@@ -182,10 +195,17 @@ def weather(
     # Пустой ответ (все поля None) кэшировать незачем — это не погода.
     if data["temperature"] is None and data["code"] is None:
         logging.warning("weather: ответ без температуры и кода")
-        return _stale(cached)
+        return _fail(key, now, cached)
 
     _weather_cache[key] = (now, data)
+    _failed_at.pop(key, None)
     return dict(data, stale=False)
+
+
+def _fail(key: tuple, now: datetime, cached) -> dict | None:
+    """Запомнить неудачу до следующего окна и отдать, что есть."""
+    _failed_at[key] = now
+    return _stale(cached)
 
 
 def _stale(cached) -> dict | None:
