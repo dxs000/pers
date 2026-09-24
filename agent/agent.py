@@ -552,6 +552,14 @@ def main() -> int:
         edges.close()
         return 1
     logging.info("хранилище: %s", eng.name)
+    import db as db_mod
+    waiting = db_mod.pending_ids(eng.conn)
+    if waiting:
+        logging.error("схема отстала от кода, не применены: %s — "
+                      "сначала `uv run db.py --init --prod`", ", ".join(waiting))
+        eng.close()
+        edges.close()
+        return 1
     sync_shelf(eng)
     boot = datetime.now(timezone.utc)
     resolve_place(eng, edges, boot)
