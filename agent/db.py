@@ -422,5 +422,12 @@ def pending_ids(conn) -> list[str]:
     по предупреждению на каждый проход, который задевает новую схему, и
     живёт дальше без черт, побуждений и снов. Лучше не стартовать вовсе.
     """
-    done = _ledger(conn)
+    # Свой курсор с кортежами, а не `_ledger`: соединение приходит от движка,
+    # а у движка строки — словари (`dict_row`), и `_ledger` с его `r[0]`
+    # падал на них `KeyError: 0` — демон умирал на старте и перезапускался
+    # по кругу (Шаг 64.1, первая редакция).
+    from psycopg.rows import tuple_row
+    with conn.cursor(row_factory=tuple_row) as cur:
+        cur.execute(LEDGER_DDL)
+        done = {r[0] for r in cur.execute("SELECT id FROM schema_migrations").fetchall()}
     return [m.name for m in discover() if m.id not in done]
