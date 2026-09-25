@@ -231,11 +231,13 @@ def handle_turn(eng, edges: Edges, text: str, now: datetime, *,
         # живёт в том, что модель видит сейчас.
         habits = echo.speech_habits([m["content"] for m in working
                                      if m.get("role") == "assistant"])
-        if habits:
-            system += "\n\n" + habits
+        # Заметка стоит ПОСЛЕ рабочей памяти, прямо перед репликой собеседника:
+        # в конце системного промпта её перевешивал десяток его же «брат»
+        # ниже по контексту. Ближе к ответу — весомее.
         messages = (
             [{"role": "system", "content": system}]
             + working
+            + ([{"role": "system", "content": habits}] if habits else [])
             + [{"role": "user", "content": text}]
         )
         response = edges.llm.chat.completions.create(

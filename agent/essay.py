@@ -26,7 +26,11 @@ ESSAY_TTL_HOURS = 72.0
 CHUNK_CHARS = 2500
 
 
-def essay_tick(eng, edges, now: datetime, *, tz=None, force: bool = False):
+def essay_tick(eng, edges, now: datetime, *, tz=None, force: bool = False,
+               about: str | None = None, why: str | None = None):
+    """`about` — что он сам решил написать (из `agenda`). Тогда проход «а
+    стоит ли» не спрашивается: решение уже принято, и переигрывать его
+    служебным вызовом значило бы решать за него."""
     tz = tz or config.TZ
     if not force:
         local = now.astimezone(tz)
@@ -44,11 +48,20 @@ def essay_tick(eng, edges, now: datetime, *, tz=None, force: bool = False):
                 return None
     current = store_essay.current_essay(eng.conn)
     if current is None:
-        return _begin(eng, edges, now)
+        return _begin(eng, edges, now, about, why)
     return _continue(eng, edges, current, now)
 
 
-def _begin(eng, edges, now: datetime):
+def _begin(eng, edges, now: datetime, about: str | None = None,
+           why: str | None = None):
+    if about and about.strip():
+        # Сел писать — значит, пишет сейчас, а не «завёл папку» до следующего
+        # решения: открыть и сразу первый кусок.
+        opened = _open(eng, now, about.strip(), (why or "захотелось").strip())
+        current = store_essay.current_essay(eng.conn)
+        if opened is None or current is None:
+            return opened
+        return _continue(eng, edges, current, now) or opened
     notes = eng.untold_notes(8)
     if not notes:
         with eng.unit():
@@ -66,6 +79,10 @@ def _begin(eng, edges, now: datetime):
         with eng.unit():
             _set_essay_at(eng, now)
         return None
+    return _open(eng, now, title, why)
+
+
+def _open(eng, now: datetime, title: str, why: str):
     path = outbox.path_for(title)
     with eng.unit():
         rel = str(path.relative_to(outbox.root()) if _under(path, outbox.root()) else path)
@@ -73,8 +90,8 @@ def _begin(eng, edges, now: datetime):
         _set_essay_at(eng, now)
         if row is None:
             return None
-    log.info("начал эссе: %s (%s)", title, why)
-    return f"начал эссе «{title}»"
+    log.info("начал писать: %s (%s)", title, why)
+    return f"начал писать «{title}»"
 
 
 def _continue(eng, edges, essay, now: datetime):
@@ -189,9 +206,10 @@ def _write_prompt(turn, essay, past) -> str:
     traits = ", ".join(turn.traits) if turn.traits else ""
     prev = "\n".join(f"- {c}" for c in past) if past else "(ещё ничего не написано)"
     return (
-        f"Ты пишешь эссе. Тему никто не задавал.\n\n"
+        f"Ты пишешь. Тему никто не задавал; что это - письмо, записка, "
+        f"рассказ, - ты знаешь сам по тому, что начал.\n\n"
         f"Тебя зовут {who}. Черты: {traits}. Настроение: {turn.mood}.\n"
-        f"Эссе: «{essay['title']}». Зачем: {essay['why']}.\n\n"
+        f"Что пишешь: «{essay['title']}». Зачем: {essay['why']}.\n\n"
         f"Уже сказано:\n{prev}\n\n"
         f"Следующий кусок, до {CHUNK_CHARS} знаков, от себя.\n\n"
         f"Формат — ТОЛЬКО JSON:\n"

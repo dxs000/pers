@@ -64,6 +64,15 @@ AGENDA_INTERVAL_HOURS = 2.0  # между решениями; шесть-сем�
 AGENDA_DRIVES_LIMIT = 5
 AGENDA_TODAY_LIMIT = 8
 AGENDA_BEFORE_LIMIT = 5
+# Привычка в делах — то же, что привычка в речи (Шаг 65), уровнем выше.
+# Пресыщение меряет предмет, а наваждение ходит разными словами вокруг одного:
+# «мама на почте», «мать гасит марку», «рука над ящиком» — три разных `about`,
+# одно дело. Смотрим на само дело: одно в такой доле последних решений —
+# привычка, и её называют, ничего не предлагая взамен.
+HABIT_PURSUITS = 8
+HABIT_SHARE = 0.6
+# Книга, которую не открывал столько дней, говорит об этом в меню.
+READ_IDLE_DAYS = 2
 AGENDA_SATURATION = 2       # то же дело об одном и том же — не больше двух раз за день (Шаг 65)
 
 ABOUT_LIMIT = 120
@@ -166,7 +175,7 @@ def agenda_tick(eng, edges, now: datetime, *, tz=None,
 
     turn = eng.snapshot(now)
     drives = eng.open_drives(now, AGENDA_DRIVES_LIMIT)
-    options = available(eng, edges)
+    options = available(eng, edges, now)
     today = eng.pursuits_between(_day_start(local), now)
     before = eng.recent_pursuits(_day_start(local), AGENDA_BEFORE_LIMIT)
 
@@ -194,8 +203,12 @@ def agenda_tick(eng, edges, now: datetime, *, tz=None,
     # уже делал сегодня» при следующем выборе. Что делать вместо, машина не
     # решает. Тема не запрещена: другая сцена про того же человека — другое
     # дело (`echo.same_subject` меряет совпадение, а не родство).
+    # Желание написать ему — исключение: повтор здесь не инерция, а нарастание.
+    # «Третий раз тянусь — значит, надо уже написать» не должно кончаться
+    # «голова не берёт». Повод копится сам (`record_urge` складывает силу по
+    # тому же предмету), и сказать или нет, решает голос, а не этот проход.
     already = echo.times_today(choice["action"], choice["about"], today)
-    if already >= AGENDA_SATURATION:
+    if choice["action"] != "reach" and already >= AGENDA_SATURATION:
         outcome = (f"не пошло - об этом сегодня уже {already} "
                    f"{'раза' if already < 5 else 'раз'}, голова не берёт")
         log.info("пресыщение: %s (%s) — сегодня уже было: %s",
@@ -214,16 +227,26 @@ def _day_start(local: datetime) -> datetime:
     return local.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def available(eng, edges) -> dict[str, str]:
+def available(eng, edges, now: datetime | None = None) -> dict[str, str]:
     """Что можно сделать сейчас -> строка меню. Недоступное в меню не
-    попадает вовсе: предложить «писать своё», когда писать не о чем, значит
-    получить пустой проход эссе и потраченное решение."""
+    попадает вовсе.
+
+    Писать можно всегда: что и кому — решает он (`about`), а не наличие
+    заметок с полей. Раньше «писать» появлялось только при заметках, и
+    «письмо, которое не дойдёт» превращалось в «хотел писать, но не с чем».
+    """
     import store_essay
 
     opts: dict[str, str] = {}
     book = eng.current_book()
     if book is not None:
-        opts["read"] = f"вернуться к «{book['title']}»"
+        line = f"вернуться к «{book['title']}»"
+        idle = _days_since(book.get("read_at"), now)
+        if idle is not None and idle >= READ_IDLE_DAYS:
+            # Факт, а не приглашение: книга лежит нетронутой. Бросить её —
+            # тоже законный исход, и меню этого не отнимает.
+            line += f" (не открывал её {idle} дн.)"
+        opts["read"] = line
     else:
         free = eng.shelf_state().get("free") or []
         if free:
@@ -233,7 +256,12 @@ def available(eng, edges) -> dict[str, str]:
     if essay is not None:
         opts["write"] = f"сесть за «{essay['title']}»"
     elif eng.untold_notes(1):
-        opts["write"] = "с полей книг накопились мысли, которые никуда не записаны"
+        opts["write"] = ("написать что-то своё - письмо, записку, что угодно; "
+                         "с полей книг к тому же накопились мысли; "
+                         "about - что и кому")
+    else:
+        opts["write"] = ("написать что-то своё - письмо, записку, что угодно; "
+                         "about - что и кому")
 
     if edges.search_key:
         opts["news"] = "посмотреть, что в мире"
@@ -252,6 +280,35 @@ def available(eng, edges) -> dict[str, str]:
                         "происходит; about - что именно наберёшь, 2-6 слов")
     opts["rest"] = "быть там, где ты есть, и делать то, что люди делают между делами"
     return opts
+
+
+def _days_since(at, now: datetime | None) -> int | None:
+    if at is None or now is None:
+        return None
+    if isinstance(at, str):
+        at = timeutil.parse_ts(at)
+        if at is None:
+            return None
+    return int((now - at).total_seconds() // 86400)
+
+
+def pursuit_habit(pursuits: list[dict]) -> str | None:
+    """Строка «заметь за собой», если одно дело съело последние решения.
+
+    «ничего» не в счёт: отдых подряд — не наваждение, а вечер.
+    """
+    recent = [p for p in pursuits if p.get("action")][-HABIT_PURSUITS:]
+    if len(recent) < HABIT_PURSUITS // 2:
+        return None
+    counts: dict[str, int] = {}
+    for p in recent:
+        counts[p["action"]] = counts.get(p["action"], 0) + 1
+    action, n = max(counts.items(), key=lambda kv: kv[1])
+    if action == "rest" or n / len(recent) < HABIT_SHARE:
+        return None
+    return (f"Заметь за собой: из последних {len(recent)} раз ты {n} "
+            f"{ACTION_PAST[action]}. Это не запрет - просто так оно выглядит "
+            f"со стороны.")
 
 
 # =============================================================================
@@ -323,6 +380,10 @@ def build_prompt(turn, local: datetime, drives: list[dict], options: dict,
         parts.append("А до этого:\n"
                      + "\n".join(_render_pursuit(p, tz) for p in before) + "\n")
 
+    habit = pursuit_habit(list(before) + list(today))
+    if habit:
+        parts.append(habit + "\n")
+
     parts.append("Что можно сейчас:\n" + "\n".join(
         f"- {ACTION_WORDS[a]} - {desc}" for a, desc in options.items()) + "\n")
 
@@ -389,7 +450,8 @@ def _perform(eng, edges, turn, choice, drives, now, tz) -> str | None:
             return cycle.reading_tick(eng, edges, now, tz=tz, force=True)
         if action == "write":
             import essay as essay_mod
-            return essay_mod.essay_tick(eng, edges, now, tz=tz, force=True)
+            return essay_mod.essay_tick(eng, edges, now, tz=tz, force=True,
+                                        about=choice["about"], why=choice["why"])
         if action == "news":
             import news as news_mod
             return news_mod.news_tick(eng, edges, now, tz=tz, force=True)
