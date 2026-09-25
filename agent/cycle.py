@@ -17,6 +17,7 @@ import embed as embed_mod
 # `agent.py` не импортирует, проверяла копию из `mind`, а демон жил другой.
 from shelf_choice import choose_book
 import timeutil
+import echo
 import web
 from mind import (CONSPECTUS_LIMIT, VERDICT_WRITE, build_system_prompt,
                   check_memory, decide_query, dream,
@@ -221,11 +222,20 @@ def handle_turn(eng, edges: Edges, text: str, now: datetime, *,
     about = embed_mod.embed(embed_mod.query_text(text, eng.working_memory()),
                             "query", edges)
     try:
+        working = eng.working_memory()
+        system = prompt_and_latch(eng, edges, now, previous, findings, tz,
+                                  about=about)
+        # Шаг 65: привычки речи. Свои прошлые ответы модель видит здесь же,
+        # в `working`, и подражает им; назвать привычку — единственный способ
+        # сделать её видимой. Считается по рабочей памяти, а не по базе: тик
+        # живёт в том, что модель видит сейчас.
+        habits = echo.speech_habits([m["content"] for m in working
+                                     if m.get("role") == "assistant"])
+        if habits:
+            system += "\n\n" + habits
         messages = (
-            [{"role": "system",
-              "content": prompt_and_latch(eng, edges, now, previous, findings, tz,
-                                          about=about)}]
-            + eng.working_memory()
+            [{"role": "system", "content": system}]
+            + working
             + [{"role": "user", "content": text}]
         )
         response = edges.llm.chat.completions.create(

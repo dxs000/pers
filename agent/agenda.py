@@ -50,6 +50,7 @@ import re
 from datetime import datetime, timedelta
 
 import config
+import echo
 import timeutil
 import web
 from openai import OpenAIError
@@ -63,6 +64,7 @@ AGENDA_INTERVAL_HOURS = 2.0  # между решениями; шесть-сем�
 AGENDA_DRIVES_LIMIT = 5
 AGENDA_TODAY_LIMIT = 8
 AGENDA_BEFORE_LIMIT = 5
+AGENDA_SATURATION = 2       # то же дело об одном и том же — не больше двух раз за день (Шаг 65)
 
 ABOUT_LIMIT = 120
 WHY_LIMIT = 200
@@ -185,6 +187,22 @@ def agenda_tick(eng, edges, now: datetime, *, tz=None,
                               choice["about"], choice["drive_id"])
     log.info("решил: %s%s — %s", ACTION_WORDS[choice["action"]],
              f" ({choice['about']})" if choice["about"] else "", choice["why"])
+
+    # Шаг 65: пресыщение. То же дело об одном и том же в третий раз за день
+    # не идёт: голова не берёт. Решение остаётся в журнале правдой — он решил,
+    # — а исход честно говорит, что не пошло; эту строку он увидит в «что ты
+    # уже делал сегодня» при следующем выборе. Что делать вместо, машина не
+    # решает. Тема не запрещена: другая сцена про того же человека — другое
+    # дело (`echo.same_subject` меряет совпадение, а не родство).
+    already = echo.times_today(choice["action"], choice["about"], today)
+    if already >= AGENDA_SATURATION:
+        outcome = (f"не пошло - об этом сегодня уже {already} "
+                   f"{'раза' if already < 5 else 'раз'}, голова не берёт")
+        log.info("пресыщение: %s (%s) — сегодня уже было: %s",
+                 ACTION_WORDS[choice["action"]], choice["about"], already)
+        with eng.unit():
+            eng.set_pursuit_outcome(pid, outcome)
+        return f"{choice['action']}: {outcome}"
 
     outcome = _perform(eng, edges, turn, choice, drives, now, tz)
     with eng.unit():
